@@ -1,0 +1,3500 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import sqlite3
+import os
+import csv
+from datetime import datetime
+
+# Pillow is used for JPG/PNG student photos
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+APP_TITLE = "Student Management System - Client Edition"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+PHOTO_DIR = os.path.join(DATA_DIR, "student_photos")
+DB_PATH = os.path.join(DATA_DIR, "students.db")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(PHOTO_DIR, exist_ok=True)
+
+SCHOOL_NAME = "HAROON ANSARI URDU HIGH SCHOOL AND JR COLLAGE"
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+class Database:
+
+    def __init__(self):
+        self.db_path = DB_PATH
+        self.create_database()
+
+    def connect(self):
+        return sqlite3.connect(self.db_path)
+
+    def create_database(self):
+
+        conn = self.connect()
+        cur = conn.cursor()
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS students (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id TEXT UNIQUE,
+                student_name TEXT NOT NULL,
+                dob TEXT,
+                gender TEXT,
+                student_class TEXT,
+                division TEXT,
+                roll_no TEXT,
+                phone TEXT,
+                email TEXT,
+                address TEXT,
+                guardian_name TEXT,
+                admission_date TEXT,
+                photo_path TEXT,
+                created_at TEXT
+            )
+        """)
+
+        conn.commit()
+
+        # ----------------------------------------------------
+        # Database migration for older versions
+        # ----------------------------------------------------
+
+        cur.execute("PRAGMA table_info(students)")
+        columns = [row[1] for row in cur.fetchall()]
+
+        required_columns = {
+            "dob": "TEXT",
+            "gender": "TEXT",
+            "student_class": "TEXT",
+            "division": "TEXT",
+            "roll_no": "TEXT",
+            "phone": "TEXT",
+            "email": "TEXT",
+            "address": "TEXT",
+            "guardian_name": "TEXT",
+            "admission_date": "TEXT",
+            "photo_path": "TEXT",
+            "created_at": "TEXT"
+        }
+
+        for column, data_type in required_columns.items():
+
+            if column not in columns:
+
+                try:
+                    cur.execute(
+                        f"ALTER TABLE students ADD COLUMN {column} {data_type}"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+        conn.commit()
+        conn.close()
+
+    # ========================================================
+    # ADD
+    # ========================================================
+
+    def add_student(self, data):
+
+        conn = self.connect()
+        cur = conn.cursor()
+
+        try:
+
+            cur.execute("""
+                INSERT INTO students (
+                    admission_id,
+                    student_name,
+                    dob,
+                    gender,
+                    student_class,
+                    division,
+                    roll_no,
+                    phone,
+                    email,
+                    address,
+                    guardian_name,
+                    admission_date,
+                    photo_path,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data["admission_id"],
+                data["student_name"],
+                data["dob"],
+                data["gender"],
+                data["student_class"],
+                data["division"],
+                data["roll_no"],
+                data["phone"],
+                data["email"],
+                data["address"],
+                data["guardian_name"],
+                data["admission_date"],
+                data["photo_path"],
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ))
+
+            conn.commit()
+            return True, "Student added successfully."
+
+        except sqlite3.IntegrityError:
+
+            return False, "Admission ID already exists."
+
+        except Exception as e:
+
+            return False, str(e)
+
+        finally:
+
+            conn.close()
+
+    # ========================================================
+    # UPDATE
+    # ========================================================
+
+    def update_student(self, admission_id, data):
+
+        conn = self.connect()
+        cur = conn.cursor()
+
+        try:
+
+            cur.execute("""
+                UPDATE students
+                SET
+                    student_name=?,
+                    dob=?,
+                    gender=?,
+                    student_class=?,
+                    division=?,
+                    roll_no=?,
+                    phone=?,
+                    email=?,
+                    address=?,
+                    guardian_name=?,
+                    admission_date=?,
+                    photo_path=?
+                WHERE admission_id=?
+            """, (
+                data["student_name"],
+                data["dob"],
+                data["gender"],
+                data["student_class"],
+                data["division"],
+                data["roll_no"],
+                data["phone"],
+                data["email"],
+                data["address"],
+                data["guardian_name"],
+                data["admission_date"],
+                data["photo_path"],
+                admission_id
+            ))
+
+            conn.commit()
+
+            if cur.rowcount > 0:
+                return True, "Student updated successfully."
+
+            return False, "Student not found."
+
+        except Exception as e:
+
+            return False, str(e)
+
+        finally:
+
+            conn.close()
+
+    # ========================================================
+    # DELETE
+    # ========================================================
+
+    def delete_student(self, admission_id):
+
+        conn = self.connect()
+        cur = conn.cursor()
+
+        try:
+
+            cur.execute(
+                "SELECT photo_path FROM students WHERE admission_id=?",
+                (admission_id,)
+            )
+
+            row = cur.fetchone()
+
+            cur.execute(
+                "DELETE FROM students WHERE admission_id=?",
+                (admission_id,)
+            )
+
+            conn.commit()
+
+            if cur.rowcount > 0:
+
+                if row and row[0]:
+                    try:
+                        if os.path.exists(row[0]):
+                            os.remove(row[0])
+                    except:
+                        pass
+
+                return True, "Student deleted successfully."
+
+            return False, "Student not found."
+
+        except Exception as e:
+
+            return False, str(e)
+
+        finally:
+
+            conn.close()
+
+    # ========================================================
+    # GET STUDENT
+    # ========================================================
+
+    def get_student(self, admission_id):
+
+        conn = self.connect()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                admission_id,
+                student_name,
+                dob,
+                gender,
+                student_class,
+                division,
+                roll_no,
+                phone,
+                email,
+                address,
+                guardian_name,
+                admission_date,
+                photo_path,
+                id
+            FROM students
+            WHERE admission_id=?
+        """, (admission_id,))
+
+        row = cur.fetchone()
+
+        conn.close()
+
+        return row
+
+    # ========================================================
+    # GET ALL
+    # ========================================================
+
+    def get_all(self):
+
+        conn = self.connect()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                id,
+                admission_id,
+                student_name,
+                gender,
+                student_class,
+                division,
+                roll_no,
+                phone,
+                email,
+                guardian_name,
+                admission_date,
+                photo_path
+            FROM students
+            ORDER BY id DESC
+        """)
+
+        rows = cur.fetchall()
+
+        conn.close()
+
+        return rows
+
+    # ========================================================
+    # SEARCH
+    # ========================================================
+
+    def search(self, keyword):
+
+        conn = self.connect()
+        cur = conn.cursor()
+
+        value = f"%{keyword}%"
+
+        cur.execute("""
+            SELECT
+                id,
+                admission_id,
+                student_name,
+                gender,
+                student_class,
+                division,
+                roll_no,
+                phone,
+                email,
+                guardian_name,
+                admission_date,
+                photo_path
+            FROM students
+            WHERE
+                admission_id LIKE ?
+                OR student_name LIKE ?
+                OR phone LIKE ?
+                OR student_class LIKE ?
+                OR roll_no LIKE ?
+            ORDER BY id DESC
+        """, (
+            value,
+            value,
+            value,
+            value,
+            value
+        ))
+
+        rows = cur.fetchall()
+
+        conn.close()
+
+        return rows
+
+    # ========================================================
+    # STATISTICS
+    # ========================================================
+
+    def statistics(self):
+
+        conn = self.connect()
+        cur = conn.cursor()
+
+        cur.execute("SELECT COUNT(*) FROM students")
+        total = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM students
+            WHERE LOWER(gender)='male'
+        """)
+        boys = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM students
+            WHERE LOWER(gender)='female'
+        """)
+        girls = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(DISTINCT student_class)
+            FROM students
+            WHERE student_class IS NOT NULL
+            AND student_class != ''
+        """)
+        classes = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT student_class, COUNT(*)
+            FROM students
+            WHERE student_class IS NOT NULL
+            AND student_class != ''
+            GROUP BY student_class
+        """)
+
+        class_data = cur.fetchall()
+
+        conn.close()
+
+        return total, boys, girls, classes, class_data
+
+
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
+
+class StudentManagementSystem(tk.Tk):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.title(APP_TITLE)
+        self.geometry("1450x850")
+        self.minsize(1150, 700)
+
+        # ----------------------------------------------------
+        # COLORS
+        # ----------------------------------------------------
+
+        self.NAVY = "#07182F"
+        self.NAVY2 = "#0B2345"
+        self.BLUE = "#1976D2"
+        self.BLUE2 = "#1565C0"
+        self.GREEN = "#16A34A"
+        self.RED = "#DC2626"
+        self.ORANGE = "#EA580C"
+
+        self.LIGHT = "#F3F6FA"
+        self.WHITE = "#FFFFFF"
+        self.TEXT = "#132238"
+        self.GRAY = "#64748B"
+        self.BORDER = "#D7DFEA"
+
+        self.configure(bg=self.LIGHT)
+
+        self.db = Database()
+
+        self.current_photo = ""
+        self.update_photo = ""
+
+        self.setup_styles()
+        self.create_sidebar()
+        self.create_dashboard()
+
+        self.refresh_dashboard()
+
+    # ========================================================
+    # STYLE
+    # ========================================================
+
+    def setup_styles(self):
+
+        style = ttk.Style()
+
+        try:
+            style.theme_use("clam")
+        except:
+            pass
+
+        style.configure(
+            "Treeview",
+            background="white",
+            foreground=self.TEXT,
+            rowheight=34,
+            fieldbackground="white",
+            font=("Segoe UI", 9)
+        )
+
+        style.configure(
+            "Treeview.Heading",
+            background=self.NAVY,
+            foreground="white",
+            font=("Segoe UI Semibold", 9)
+        )
+
+        style.map(
+            "Treeview",
+            background=[("selected", "#DCEBFF")],
+            foreground=[("selected", self.TEXT)]
+        )
+
+    # ========================================================
+    # SIDEBAR
+    # ========================================================
+
+    def create_sidebar(self):
+
+        self.sidebar = tk.Frame(
+            self,
+            bg=self.NAVY,
+            width=235
+        )
+
+        self.sidebar.pack(
+            side="left",
+            fill="y"
+        )
+
+        self.sidebar.pack_propagate(False)
+
+        # Logo
+        logo_frame = tk.Frame(
+            self.sidebar,
+            bg=self.NAVY
+        )
+
+        logo_frame.pack(
+            fill="x",
+            padx=18,
+            pady=22
+        )
+
+        tk.Label(
+            logo_frame,
+            text="H.A.U.H.S",
+            font=("Segoe UI Black", 20),
+            fg="white",
+            bg=self.NAVY
+        ).pack(anchor="w")
+
+        tk.Label(
+            logo_frame,
+            text="STUDENT MANAGEMENT",
+            font=("Segoe UI Semibold", 8),
+            fg="#93C5FD",
+            bg=self.NAVY
+        ).pack(anchor="w")
+
+        tk.Frame(
+            self.sidebar,
+            height=1,
+            bg="#1E3A5F"
+        ).pack(
+            fill="x",
+            padx=18
+        )
+
+        # Navigation
+        self.nav_button("▣", "Dashboard", self.show_dashboard)
+        self.nav_button("＋", "Add Student", self.open_add_student)
+        self.nav_button("⌕", "Search Student", self.open_search_student)
+        self.nav_button("✎", "Update Student", self.open_update_student)
+        self.nav_button("×", "Delete Student", self.open_delete_student)
+        self.nav_button("☷", "All Students", self.open_all_students)
+        self.nav_button("▤", "Student ID Card", self.open_id_card)
+        self.nav_button("◫", "Reports / Export", self.open_reports)
+
+        # Bottom
+        bottom = tk.Frame(
+            self.sidebar,
+            bg=self.NAVY
+        )
+
+        bottom.pack(
+            side="bottom",
+            fill="x",
+            padx=18,
+            pady=20
+        )
+
+        tk.Label(
+            bottom,
+            text="DATABASE",
+            font=("Segoe UI Semibold", 8),
+            fg="#64748B",
+            bg=self.NAVY
+        ).pack(anchor="w")
+
+        tk.Label(
+            bottom,
+            text="●  SQLite Online",
+            font=("Segoe UI Semibold", 9),
+            fg="#4ADE80",
+            bg=self.NAVY
+        ).pack(anchor="w", pady=(3, 0))
+
+        tk.Label(
+            bottom,
+            text="v3.0 • Client Edition",
+            font=("Segoe UI", 8),
+            fg="#64748B",
+            bg=self.NAVY
+        ).pack(anchor="w", pady=(8, 0))
+
+    def nav_button(self, icon, text, command):
+
+        button = tk.Button(
+            self.sidebar,
+            text=f"  {icon}    {text}",
+            command=command,
+            anchor="w",
+            bg=self.NAVY,
+            fg="#DCE7F5",
+            activebackground=self.NAVY2,
+            activeforeground="white",
+            bd=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+            padx=20,
+            pady=12
+        )
+
+        button.pack(
+            fill="x",
+            padx=8,
+            pady=2
+        )
+
+    # ========================================================
+    # DASHBOARD
+    # ========================================================
+
+    def create_dashboard(self):
+
+        self.main = tk.Frame(
+            self,
+            bg=self.LIGHT
+        )
+
+        self.main.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        # Header
+        header = tk.Frame(
+            self.main,
+            bg=self.LIGHT
+        )
+
+        header.pack(
+            fill="x",
+            padx=30,
+            pady=(25, 10)
+        )
+
+        tk.Label(
+            header,
+            text="Dashboard",
+            font=("Segoe UI Semibold", 28),
+            fg=self.TEXT,
+            bg=self.LIGHT
+        ).pack(anchor="w")
+
+        tk.Label(
+            header,
+            text="Student Management System • Overview & Analytics",
+            font=("Segoe UI", 10),
+            fg=self.GRAY,
+            bg=self.LIGHT
+        ).pack(anchor="w")
+
+        # Cards
+        self.cards_frame = tk.Frame(
+            self.main,
+            bg=self.LIGHT
+        )
+
+        self.cards_frame.pack(
+            fill="x",
+            padx=30,
+            pady=15
+        )
+
+        self.total_value = self.create_card(
+            self.cards_frame,
+            "TOTAL STUDENTS",
+            "0",
+            self.BLUE
+        )
+
+        self.boys_value = self.create_card(
+            self.cards_frame,
+            "BOYS",
+            "0",
+            "#2563EB"
+        )
+
+        self.girls_value = self.create_card(
+            self.cards_frame,
+            "GIRLS",
+            "0",
+            "#DB2777"
+        )
+
+        self.classes_value = self.create_card(
+            self.cards_frame,
+            "ACTIVE CLASSES",
+            "0",
+            self.GREEN
+        )
+
+        # Graph area
+        graph_area = tk.Frame(
+            self.main,
+            bg=self.LIGHT
+        )
+
+        graph_area.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=(5, 25)
+        )
+
+        # Gender graph
+        gender_panel = tk.Frame(
+            graph_area,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        gender_panel.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(0, 10)
+        )
+
+        tk.Label(
+            gender_panel,
+            text="Gender Distribution",
+            font=("Segoe UI Semibold", 16),
+            fg=self.TEXT,
+            bg="white"
+        ).pack(
+            anchor="w",
+            padx=20,
+            pady=(18, 0)
+        )
+
+        tk.Label(
+            gender_panel,
+            text="Boys vs Girls",
+            font=("Segoe UI", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).pack(
+            anchor="w",
+            padx=20
+        )
+
+        self.gender_canvas = tk.Canvas(
+            gender_panel,
+            bg="white",
+            highlightthickness=0
+        )
+
+        self.gender_canvas.pack(
+            fill="both",
+            expand=True,
+            padx=20,
+            pady=15
+        )
+
+        # Class graph
+        class_panel = tk.Frame(
+            graph_area,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        class_panel.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(10, 0)
+        )
+
+        tk.Label(
+            class_panel,
+            text="Class-wise Students",
+            font=("Segoe UI Semibold", 16),
+            fg=self.TEXT,
+            bg="white"
+        ).pack(
+            anchor="w",
+            padx=20,
+            pady=(18, 0)
+        )
+
+        tk.Label(
+            class_panel,
+            text="Student count by class",
+            font=("Segoe UI", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).pack(
+            anchor="w",
+            padx=20
+        )
+
+        self.class_canvas = tk.Canvas(
+            class_panel,
+            bg="white",
+            highlightthickness=0
+        )
+
+        self.class_canvas.pack(
+            fill="both",
+            expand=True,
+            padx=20,
+            pady=15
+        )
+
+    def create_card(self, parent, title, value, color):
+
+        card = tk.Frame(
+            parent,
+            bg="white",
+            height=105,
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        card.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=5
+        )
+
+        card.pack_propagate(False)
+
+        tk.Frame(
+            card,
+            bg=color,
+            width=5
+        ).pack(
+            side="left",
+            fill="y"
+        )
+
+        content = tk.Frame(
+            card,
+            bg="white"
+        )
+
+        content.pack(
+            fill="both",
+            expand=True,
+            padx=18,
+            pady=15
+        )
+
+        tk.Label(
+            content,
+            text=title,
+            font=("Segoe UI Semibold", 8),
+            fg=self.GRAY,
+            bg="white"
+        ).pack(anchor="w")
+
+        value_label = tk.Label(
+            content,
+            text=value,
+            font=("Segoe UI Black", 24),
+            fg=self.TEXT,
+            bg="white"
+        )
+
+        value_label.pack(anchor="w")
+
+        return value_label
+
+    # ========================================================
+    # DASHBOARD REFRESH
+    # ========================================================
+
+    def refresh_dashboard(self):
+
+        total, boys, girls, classes, class_data = self.db.statistics()
+
+        self.total_value.config(text=str(total))
+        self.boys_value.config(text=str(boys))
+        self.girls_value.config(text=str(girls))
+        self.classes_value.config(text=str(classes))
+
+        self.draw_gender_graph(
+            boys,
+            girls
+        )
+
+        self.draw_class_graph(
+            class_data
+        )
+
+    # ========================================================
+    # GENDER GRAPH
+    # ========================================================
+
+    def draw_gender_graph(self, boys, girls):
+
+        canvas = self.gender_canvas
+
+        canvas.delete("all")
+
+        canvas.update_idletasks()
+
+        width = max(canvas.winfo_width(), 300)
+        height = max(canvas.winfo_height(), 250)
+
+        total = boys + girls
+
+        if total == 0:
+
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="No student data available",
+                fill=self.GRAY,
+                font=("Segoe UI", 11)
+            )
+
+            return
+
+        max_value = max(boys, girls, 1)
+
+        base_y = height - 60
+        top_y = 45
+
+        chart_height = base_y - top_y
+
+        bar_width = 90
+
+        x1 = width // 2 - 100
+        x2 = width // 2 + 100
+
+        # Axis
+        canvas.create_line(
+            60,
+            base_y,
+            width - 40,
+            base_y,
+            fill="#CBD5E1",
+            width=1
+        )
+
+        # Boys
+        boy_height = int(
+            chart_height * boys / max_value
+        )
+
+        canvas.create_rectangle(
+            x1 - bar_width // 2,
+            base_y - boy_height,
+            x1 + bar_width // 2,
+            base_y,
+            fill="#2563EB",
+            outline=""
+        )
+
+        canvas.create_text(
+            x1,
+            base_y - boy_height - 15,
+            text=str(boys),
+            fill=self.TEXT,
+            font=("Segoe UI Black", 14)
+        )
+
+        canvas.create_text(
+            x1,
+            base_y + 22,
+            text="BOYS",
+            fill=self.GRAY,
+            font=("Segoe UI Semibold", 9)
+        )
+
+        # Girls
+        girl_height = int(
+            chart_height * girls / max_value
+        )
+
+        canvas.create_rectangle(
+            x2 - bar_width // 2,
+            base_y - girl_height,
+            x2 + bar_width // 2,
+            base_y,
+            fill="#DB2777",
+            outline=""
+        )
+
+        canvas.create_text(
+            x2,
+            base_y - girl_height - 15,
+            text=str(girls),
+            fill=self.TEXT,
+            font=("Segoe UI Black", 14)
+        )
+
+        canvas.create_text(
+            x2,
+            base_y + 22,
+            text="GIRLS",
+            fill=self.GRAY,
+            font=("Segoe UI Semibold", 9)
+        )
+
+        # Percentage
+        boy_percent = boys / total * 100
+        girl_percent = girls / total * 100
+
+        canvas.create_text(
+            x1,
+            base_y + 45,
+            text=f"{boy_percent:.1f}%",
+            fill="#2563EB",
+            font=("Segoe UI Semibold", 9)
+        )
+
+        canvas.create_text(
+            x2,
+            base_y + 45,
+            text=f"{girl_percent:.1f}%",
+            fill="#DB2777",
+            font=("Segoe UI Semibold", 9)
+        )
+
+    # ========================================================
+    # CLASS GRAPH
+    # ========================================================
+
+    def draw_class_graph(self, class_data):
+
+        canvas = self.class_canvas
+
+        canvas.delete("all")
+
+        canvas.update_idletasks()
+
+        width = max(canvas.winfo_width(), 350)
+        height = max(canvas.winfo_height(), 250)
+
+        if not class_data:
+
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="No student data available",
+                fill=self.GRAY,
+                font=("Segoe UI", 11)
+            )
+
+            return
+
+        order = [
+            "5th",
+            "6th",
+            "7th",
+            "8th",
+            "9th",
+            "10th",
+            "11th",
+            "12th"
+        ]
+
+        data_dict = dict(class_data)
+
+        ordered = []
+
+        for cls in order:
+
+            if cls in data_dict:
+                ordered.append(
+                    (cls, data_dict[cls])
+                )
+
+        # Other classes
+        for cls, count in class_data:
+
+            if cls not in order:
+                ordered.append(
+                    (cls, count)
+                )
+
+        if not ordered:
+            return
+
+        max_value = max(
+            count for _, count in ordered
+        )
+
+        left = 60
+        right = width - 25
+        top = 35
+        bottom = height - 40
+
+        chart_width = right - left
+        chart_height = bottom - top
+
+        count = len(ordered)
+
+        bar_width = max(
+            25,
+            int(chart_width / count * 0.55)
+        )
+
+        gap = chart_width / count
+
+        for i, (class_name, number) in enumerate(ordered):
+
+            x_center = left + gap * i + gap / 2
+
+            bar_height = int(
+                chart_height * number / max_value
+            )
+
+            x1 = x_center - bar_width / 2
+            x2 = x_center + bar_width / 2
+
+            y1 = bottom - bar_height
+            y2 = bottom
+
+            canvas.create_rectangle(
+                x1,
+                y1,
+                x2,
+                y2,
+                fill=self.BLUE,
+                outline=""
+            )
+
+            canvas.create_text(
+                x_center,
+                y1 - 12,
+                text=str(number),
+                fill=self.TEXT,
+                font=("Segoe UI Semibold", 9)
+            )
+
+            canvas.create_text(
+                x_center,
+                bottom + 18,
+                text=class_name,
+                fill=self.GRAY,
+                font=("Segoe UI Semibold", 8)
+            )
+
+        canvas.create_line(
+            left,
+            bottom,
+            right,
+            bottom,
+            fill="#CBD5E1"
+        )
+
+    # ========================================================
+    # SHOW DASHBOARD
+    # ========================================================
+
+    def show_dashboard(self):
+
+        self.refresh_dashboard()
+
+    # ========================================================
+    # ADD STUDENT
+    # ========================================================
+
+    def open_add_student(self):
+
+        window = tk.Toplevel(self)
+
+        window.title("Add Student")
+        window.geometry("1050x760")
+        window.minsize(900, 650)
+        window.configure(bg=self.LIGHT)
+
+        tk.Label(
+            window,
+            text="Add Student",
+            font=("Segoe UI Semibold", 25),
+            fg=self.TEXT,
+            bg=self.LIGHT
+        ).pack(
+            anchor="w",
+            padx=30,
+            pady=(25, 2)
+        )
+
+        tk.Label(
+            window,
+            text="Enter complete student information",
+            font=("Segoe UI", 10),
+            fg=self.GRAY,
+            bg=self.LIGHT
+        ).pack(
+            anchor="w",
+            padx=30
+        )
+
+        main = tk.Frame(
+            window,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        main.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=20
+        )
+
+        form = tk.Frame(
+            main,
+            bg="white"
+        )
+
+        form.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=25
+        )
+
+        photo_panel = tk.Frame(
+            main,
+            bg="#F8FAFC",
+            width=270
+        )
+
+        photo_panel.pack(
+            side="right",
+            fill="y"
+        )
+
+        photo_panel.pack_propagate(False)
+
+        # Variables
+        admission = tk.StringVar()
+        name = tk.StringVar()
+        dob = tk.StringVar()
+        gender = tk.StringVar(value="Male")
+        student_class = tk.StringVar(value="5th")
+        division = tk.StringVar()
+        roll = tk.StringVar()
+        phone = tk.StringVar()
+        email = tk.StringVar()
+        guardian = tk.StringVar()
+        admission_date = tk.StringVar(
+            value=datetime.now().strftime("%d/%m/%Y")
+        )
+
+        entries = {}
+
+        def add_field(parent, label, variable, row, column):
+
+            tk.Label(
+                parent,
+                text=label,
+                font=("Segoe UI Semibold", 9),
+                fg=self.GRAY,
+                bg="white"
+            ).grid(
+                row=row,
+                column=column,
+                sticky="w",
+                padx=8,
+                pady=(8, 2)
+            )
+
+            entry = tk.Entry(
+                parent,
+                textvariable=variable,
+                font=("Segoe UI", 10),
+                relief="solid",
+                bd=1
+            )
+
+            entry.grid(
+                row=row + 1,
+                column=column,
+                sticky="ew",
+                padx=8,
+                pady=(0, 7),
+                ipady=7
+            )
+
+            entries[label] = entry
+
+        form.grid_columnconfigure(0, weight=1)
+        form.grid_columnconfigure(1, weight=1)
+
+        add_field(
+            form,
+            "Admission ID *",
+            admission,
+            0,
+            0
+        )
+
+        add_field(
+            form,
+            "Student Name *",
+            name,
+            0,
+            1
+        )
+
+        add_field(
+            form,
+            "Date of Birth",
+            dob,
+            2,
+            0
+        )
+
+        add_field(
+            form,
+            "Roll No",
+            roll,
+            2,
+            1
+        )
+
+        add_field(
+            form,
+            "Division",
+            division,
+            4,
+            0
+        )
+
+        add_field(
+            form,
+            "Phone",
+            phone,
+            4,
+            1
+        )
+
+        add_field(
+            form,
+            "Email",
+            email,
+            6,
+            0
+        )
+
+        add_field(
+            form,
+            "Guardian Name",
+            guardian,
+            6,
+            1
+        )
+
+        # Gender
+        tk.Label(
+            form,
+            text="Gender",
+            font=("Segoe UI Semibold", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).grid(
+            row=8,
+            column=0,
+            sticky="w",
+            padx=8
+        )
+
+        gender_frame = tk.Frame(
+            form,
+            bg="white"
+        )
+
+        gender_frame.grid(
+            row=9,
+            column=0,
+            sticky="w",
+            padx=8,
+            pady=(0, 10)
+        )
+
+        for value in ["Male", "Female", "Other"]:
+
+            tk.Radiobutton(
+                gender_frame,
+                text=value,
+                variable=gender,
+                value=value,
+                bg="white",
+                fg=self.TEXT,
+                activebackground="white",
+                font=("Segoe UI", 9)
+            ).pack(
+                side="left",
+                padx=(0, 12)
+            )
+
+        # Class
+        tk.Label(
+            form,
+            text="Class",
+            font=("Segoe UI Semibold", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).grid(
+            row=8,
+            column=1,
+            sticky="w",
+            padx=8
+        )
+
+        class_combo = ttk.Combobox(
+            form,
+            textvariable=student_class,
+            values=[
+                "5th",
+                "6th",
+                "7th",
+                "8th",
+                "9th",
+                "10th",
+                "11th",
+                "12th"
+            ],
+            state="readonly",
+            font=("Segoe UI", 10)
+        )
+
+        class_combo.grid(
+            row=9,
+            column=1,
+            sticky="ew",
+            padx=8,
+            pady=(0, 10),
+            ipady=5
+        )
+
+        # Admission date
+        tk.Label(
+            form,
+            text="Admission Date",
+            font=("Segoe UI Semibold", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).grid(
+            row=10,
+            column=0,
+            sticky="w",
+            padx=8
+        )
+
+        tk.Entry(
+            form,
+            textvariable=admission_date,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        ).grid(
+            row=11,
+            column=0,
+            sticky="ew",
+            padx=8,
+            pady=(0, 10),
+            ipady=7
+        )
+
+        # Address
+        tk.Label(
+            form,
+            text="Address",
+            font=("Segoe UI Semibold", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).grid(
+            row=10,
+            column=1,
+            sticky="w",
+            padx=8
+        )
+
+        address_text = tk.Text(
+            form,
+            height=3,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        )
+
+        address_text.grid(
+            row=11,
+            column=1,
+            sticky="ew",
+            padx=8,
+            pady=(0, 10)
+        )
+
+        # ====================================================
+        # PHOTO PANEL
+        # ====================================================
+
+        tk.Label(
+            photo_panel,
+            text="Student Photo",
+            font=("Segoe UI Semibold", 16),
+            fg=self.TEXT,
+            bg="#F8FAFC"
+        ).pack(
+            pady=(25, 5)
+        )
+
+        tk.Label(
+            photo_panel,
+            text="JPG / PNG / JPEG",
+            font=("Segoe UI", 8),
+            fg=self.GRAY,
+            bg="#F8FAFC"
+        ).pack()
+
+        photo_preview = tk.Label(
+            photo_panel,
+            text="NO PHOTO",
+            bg="#E2E8F0",
+            fg=self.GRAY,
+            font=("Segoe UI Semibold", 10),
+            width=18,
+            height=10
+        )
+
+        photo_preview.pack(
+            pady=20
+        )
+
+        selected_photo = {
+            "path": ""
+        }
+
+        def choose_photo():
+
+            if not PIL_AVAILABLE:
+
+                messagebox.showwarning(
+                    "Pillow Required",
+                    "Please install Pillow first:\n\npip install pillow",
+                    parent=window
+                )
+
+                return
+
+            path = filedialog.askopenfilename(
+                parent=window,
+                title="Select Student Photo",
+                filetypes=[
+                    ("Image Files", "*.jpg *.jpeg *.png *.bmp"),
+                    ("All Files", "*.*")
+                ]
+            )
+
+            if not path:
+                return
+
+            try:
+
+                image = Image.open(path)
+                image.thumbnail((160, 180))
+
+                photo = ImageTk.PhotoImage(image)
+
+                photo_preview.config(
+                    image=photo,
+                    text=""
+                )
+
+                photo_preview.image = photo
+                selected_photo["path"] = path
+
+            except Exception as e:
+
+                messagebox.showerror(
+                    "Photo Error",
+                    str(e),
+                    parent=window
+                )
+
+        tk.Button(
+            photo_panel,
+            text="Select Photo",
+            command=choose_photo,
+            bg=self.BLUE,
+            fg="white",
+            activebackground=self.BLUE2,
+            activeforeground="white",
+            bd=0,
+            font=("Segoe UI Semibold", 9),
+            cursor="hand2",
+            padx=25,
+            pady=10
+        ).pack()
+
+        # ====================================================
+        # SAVE
+        # ====================================================
+
+        def save_student():
+
+            if not admission.get().strip():
+
+                messagebox.showwarning(
+                    "Required",
+                    "Admission ID is required.",
+                    parent=window
+                )
+
+                return
+
+            if not name.get().strip():
+
+                messagebox.showwarning(
+                    "Required",
+                    "Student Name is required.",
+                    parent=window
+                )
+
+                return
+
+            photo_path = ""
+
+            # Copy photo into application folder
+            if selected_photo["path"]:
+
+                try:
+
+                    ext = os.path.splitext(
+                        selected_photo["path"]
+                    )[1]
+
+                    filename = (
+                        admission.get().strip()
+                        + "_photo"
+                        + ext
+                    )
+
+                    destination = os.path.join(
+                        PHOTO_DIR,
+                        filename
+                    )
+
+                    with open(
+                        selected_photo["path"],
+                        "rb"
+                    ) as source:
+
+                        with open(
+                            destination,
+                            "wb"
+                        ) as target:
+
+                            target.write(
+                                source.read()
+                            )
+
+                    photo_path = destination
+
+                except Exception as e:
+
+                    messagebox.showerror(
+                        "Photo Error",
+                        str(e),
+                        parent=window
+                    )
+
+                    return
+
+            data = {
+                "admission_id": admission.get().strip(),
+                "student_name": name.get().strip(),
+                "dob": dob.get().strip(),
+                "gender": gender.get(),
+                "student_class": student_class.get(),
+                "division": division.get().strip(),
+                "roll_no": roll.get().strip(),
+                "phone": phone.get().strip(),
+                "email": email.get().strip(),
+                "address": address_text.get("1.0", "end").strip(),
+                "guardian_name": guardian.get().strip(),
+                "admission_date": admission_date.get().strip(),
+                "photo_path": photo_path
+            }
+
+            success, message = self.db.add_student(data)
+
+            if success:
+
+                messagebox.showinfo(
+                    "Success",
+                    message,
+                    parent=window
+                )
+
+                window.destroy()
+                self.refresh_dashboard()
+
+            else:
+
+                messagebox.showerror(
+                    "Error",
+                    message,
+                    parent=window
+                )
+
+        bottom = tk.Frame(
+            window,
+            bg=self.LIGHT
+        )
+
+        bottom.pack(
+            fill="x",
+            padx=30,
+            pady=(0, 20)
+        )
+
+        tk.Button(
+            bottom,
+            text="Save Student",
+            command=save_student,
+            bg=self.GREEN,
+            fg="white",
+            activebackground="#15803D",
+            activeforeground="white",
+            bd=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+            padx=30,
+            pady=11
+        ).pack(
+            side="right"
+        )
+
+        tk.Button(
+            bottom,
+            text="Cancel",
+            command=window.destroy,
+            bg="#E2E8F0",
+            fg=self.TEXT,
+            activebackground="#CBD5E1",
+            bd=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+            padx=30,
+            pady=11
+        ).pack(
+            side="right",
+            padx=10
+        )
+
+    # ========================================================
+    # SEARCH STUDENT
+    # ========================================================
+
+    def open_search_student(self):
+
+        window = tk.Toplevel(self)
+
+        window.title("Search Student")
+        window.geometry("1100x650")
+        window.minsize(900, 550)
+        window.configure(bg=self.LIGHT)
+
+        tk.Label(
+            window,
+            text="Search Students",
+            font=("Segoe UI Semibold", 25),
+            fg=self.TEXT,
+            bg=self.LIGHT
+        ).pack(
+            anchor="w",
+            padx=30,
+            pady=(25, 5)
+        )
+
+        search_frame = tk.Frame(
+            window,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        search_frame.pack(
+            fill="x",
+            padx=30,
+            pady=15
+        )
+
+        keyword = tk.StringVar()
+
+        entry = tk.Entry(
+            search_frame,
+            textvariable=keyword,
+            font=("Segoe UI", 11),
+            relief="solid",
+            bd=1
+        )
+
+        entry.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=15,
+            pady=12,
+            ipady=6
+        )
+
+        table_frame = tk.Frame(
+            window,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        table_frame.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=(0, 25)
+        )
+
+        columns = (
+            "ID",
+            "Admission ID",
+            "Name",
+            "Gender",
+            "Class",
+            "Division",
+            "Roll No",
+            "Phone"
+        )
+
+        tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings"
+        )
+
+        widths = [
+            60,
+            130,
+            220,
+            90,
+            80,
+            90,
+            90,
+            140
+        ]
+
+        for col, width in zip(columns, widths):
+
+            tree.heading(
+                col,
+                text=col
+            )
+
+            tree.column(
+                col,
+                width=width,
+                anchor="center"
+            )
+
+        scroll = ttk.Scrollbar(
+            table_frame,
+            orient="vertical",
+            command=tree.yview
+        )
+
+        tree.configure(
+            yscrollcommand=scroll.set
+        )
+
+        tree.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        scroll.pack(
+            side="right",
+            fill="y"
+        )
+
+        def perform_search():
+
+            for item in tree.get_children():
+                tree.delete(item)
+
+            rows = self.db.search(
+                keyword.get().strip()
+            )
+
+            for row in rows:
+
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5],
+                        row[6],
+                        row[7]
+                    )
+                )
+
+        tk.Button(
+            search_frame,
+            text="Search",
+            command=perform_search,
+            bg=self.BLUE,
+            fg="white",
+            activebackground=self.BLUE2,
+            activeforeground="white",
+            bd=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+            padx=30,
+            pady=11
+        ).pack(
+            side="right",
+            padx=15
+        )
+
+        entry.bind(
+            "<Return>",
+            lambda e: perform_search()
+        )
+
+        perform_search()
+
+    # ========================================================
+    # UPDATE STUDENT
+    # ========================================================
+
+    def open_update_student(self):
+
+        window = tk.Toplevel(self)
+
+        window.title("Update Student")
+        window.geometry("1000x720")
+        window.minsize(850, 600)
+        window.configure(bg=self.LIGHT)
+
+        tk.Label(
+            window,
+            text="Update Student",
+            font=("Segoe UI Semibold", 25),
+            fg=self.TEXT,
+            bg=self.LIGHT
+        ).pack(
+            anchor="w",
+            padx=30,
+            pady=(25, 5)
+        )
+
+        top = tk.Frame(
+            window,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        top.pack(
+            fill="x",
+            padx=30,
+            pady=10
+        )
+
+        admission = tk.StringVar()
+
+        tk.Label(
+            top,
+            text="Admission ID",
+            font=("Segoe UI Semibold", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).pack(
+            side="left",
+            padx=(15, 5)
+        )
+
+        entry_search = tk.Entry(
+            top,
+            textvariable=admission,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        )
+
+        entry_search.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=5,
+            pady=12,
+            ipady=5
+        )
+
+        form_frame = tk.Frame(
+            window,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        form_frame.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=10
+        )
+
+        variables = {}
+
+        names = [
+            "Student Name",
+            "Date of Birth",
+            "Gender",
+            "Class",
+            "Division",
+            "Roll No",
+            "Phone",
+            "Email",
+            "Guardian Name",
+            "Admission Date"
+        ]
+
+        for name in names:
+            variables[name] = tk.StringVar()
+
+        # Labels / entries
+        field_positions = [
+            ("Student Name", 0, 0),
+            ("Date of Birth", 0, 1),
+            ("Division", 1, 0),
+            ("Roll No", 1, 1),
+            ("Phone", 2, 0),
+            ("Email", 2, 1),
+            ("Guardian Name", 3, 0),
+            ("Admission Date", 3, 1)
+        ]
+
+        for label, row, col in field_positions:
+
+            tk.Label(
+                form_frame,
+                text=label,
+                font=("Segoe UI Semibold", 9),
+                fg=self.GRAY,
+                bg="white"
+            ).grid(
+                row=row * 2,
+                column=col,
+                sticky="w",
+                padx=20,
+                pady=(15, 3)
+            )
+
+            tk.Entry(
+                form_frame,
+                textvariable=variables[label],
+                font=("Segoe UI", 10),
+                relief="solid",
+                bd=1
+            ).grid(
+                row=row * 2 + 1,
+                column=col,
+                sticky="ew",
+                padx=20,
+                ipady=7
+            )
+
+        form_frame.grid_columnconfigure(0, weight=1)
+        form_frame.grid_columnconfigure(1, weight=1)
+
+        # Gender
+        tk.Label(
+            form_frame,
+            text="Gender",
+            font=("Segoe UI Semibold", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).grid(
+            row=4,
+            column=0,
+            sticky="w",
+            padx=20,
+            pady=(15, 3)
+        )
+
+        gender_combo = ttk.Combobox(
+            form_frame,
+            textvariable=variables["Gender"],
+            values=["Male", "Female", "Other"],
+            state="readonly"
+        )
+
+        gender_combo.grid(
+            row=5,
+            column=0,
+            sticky="ew",
+            padx=20,
+            ipady=5
+        )
+
+        # Class
+        tk.Label(
+            form_frame,
+            text="Class",
+            font=("Segoe UI Semibold", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).grid(
+            row=4,
+            column=1,
+            sticky="w",
+            padx=20,
+            pady=(15, 3)
+        )
+
+        class_combo = ttk.Combobox(
+            form_frame,
+            textvariable=variables["Class"],
+            values=[
+                "5th",
+                "6th",
+                "7th",
+                "8th",
+                "9th",
+                "10th",
+                "11th",
+                "12th"
+            ],
+            state="readonly"
+        )
+
+        class_combo.grid(
+            row=5,
+            column=1,
+            sticky="ew",
+            padx=20,
+            ipady=5
+        )
+
+        # Address
+        tk.Label(
+            form_frame,
+            text="Address",
+            font=("Segoe UI Semibold", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).grid(
+            row=6,
+            column=0,
+            sticky="w",
+            padx=20,
+            pady=(15, 3)
+        )
+
+        address = tk.Text(
+            form_frame,
+            height=3,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        )
+
+        address.grid(
+            row=7,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=20
+        )
+
+        photo_path = {
+            "value": ""
+        }
+
+        def search():
+
+            row = self.db.get_student(
+                admission.get().strip()
+            )
+
+            if not row:
+
+                messagebox.showerror(
+                    "Not Found",
+                    "Student not found.",
+                    parent=window
+                )
+
+                return
+
+            variables["Student Name"].set(row[1] or "")
+            variables["Date of Birth"].set(row[2] or "")
+            variables["Gender"].set(row[3] or "Male")
+            variables["Class"].set(row[4] or "5th")
+            variables["Division"].set(row[5] or "")
+            variables["Roll No"].set(row[6] or "")
+            variables["Phone"].set(row[7] or "")
+            variables["Email"].set(row[8] or "")
+            variables["Guardian Name"].set(row[10] or "")
+            variables["Admission Date"].set(row[11] or "")
+
+            address.delete("1.0", "end")
+            address.insert(
+                "1.0",
+                row[9] or ""
+            )
+
+            photo_path["value"] = row[12] or ""
+
+            messagebox.showinfo(
+                "Loaded",
+                "Student information loaded.",
+                parent=window
+            )
+
+        def choose_photo():
+
+            path = filedialog.askopenfilename(
+                parent=window,
+                filetypes=[
+                    ("Image Files", "*.jpg *.jpeg *.png *.bmp"),
+                    ("All Files", "*.*")
+                ]
+            )
+
+            if path:
+                photo_path["value"] = path
+
+        def update():
+
+            if not admission.get().strip():
+                return
+
+            data = {
+                "student_name": variables["Student Name"].get(),
+                "dob": variables["Date of Birth"].get(),
+                "gender": variables["Gender"].get(),
+                "student_class": variables["Class"].get(),
+                "division": variables["Division"].get(),
+                "roll_no": variables["Roll No"].get(),
+                "phone": variables["Phone"].get(),
+                "email": variables["Email"].get(),
+                "address": address.get("1.0", "end").strip(),
+                "guardian_name": variables["Guardian Name"].get(),
+                "admission_date": variables["Admission Date"].get(),
+                "photo_path": photo_path["value"]
+            }
+
+            success, msg = self.db.update_student(
+                admission.get().strip(),
+                data
+            )
+
+            if success:
+
+                messagebox.showinfo(
+                    "Success",
+                    msg,
+                    parent=window
+                )
+
+                window.destroy()
+                self.refresh_dashboard()
+
+            else:
+
+                messagebox.showerror(
+                    "Error",
+                    msg,
+                    parent=window
+                )
+
+        tk.Button(
+            top,
+            text="Find Student",
+            command=search,
+            bg=self.BLUE,
+            fg="white",
+            activebackground=self.BLUE2,
+            bd=0,
+            font=("Segoe UI Semibold", 9),
+            cursor="hand2",
+            padx=20,
+            pady=10
+        ).pack(
+            side="right",
+            padx=15
+        )
+
+        bottom = tk.Frame(
+            window,
+            bg=self.LIGHT
+        )
+
+        bottom.pack(
+            fill="x",
+            padx=30,
+            pady=10
+        )
+
+        tk.Button(
+            bottom,
+            text="Change Photo",
+            command=choose_photo,
+            bg="#E2E8F0",
+            fg=self.TEXT,
+            bd=0,
+            font=("Segoe UI Semibold", 9),
+            cursor="hand2",
+            padx=20,
+            pady=10
+        ).pack(
+            side="left"
+        )
+
+        tk.Button(
+            bottom,
+            text="Update Student",
+            command=update,
+            bg=self.GREEN,
+            fg="white",
+            bd=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+            padx=25,
+            pady=10
+        ).pack(
+            side="right"
+        )
+
+    # ========================================================
+    # DELETE STUDENT
+    # ========================================================
+
+    def open_delete_student(self):
+
+        window = tk.Toplevel(self)
+
+        window.title("Delete Student")
+        window.geometry("550x350")
+        window.configure(bg=self.LIGHT)
+
+        tk.Label(
+            window,
+            text="Delete Student",
+            font=("Segoe UI Semibold", 24),
+            fg=self.TEXT,
+            bg=self.LIGHT
+        ).pack(
+            pady=(35, 10)
+        )
+
+        tk.Label(
+            window,
+            text="Enter Admission ID to delete",
+            font=("Segoe UI", 10),
+            fg=self.GRAY,
+            bg=self.LIGHT
+        ).pack()
+
+        admission = tk.StringVar()
+
+        tk.Entry(
+            window,
+            textvariable=admission,
+            font=("Segoe UI", 11),
+            relief="solid",
+            bd=1
+        ).pack(
+            fill="x",
+            padx=60,
+            pady=20,
+            ipady=8
+        )
+
+        def delete():
+
+            value = admission.get().strip()
+
+            if not value:
+
+                messagebox.showwarning(
+                    "Required",
+                    "Enter Admission ID.",
+                    parent=window
+                )
+
+                return
+
+            student = self.db.get_student(value)
+
+            if not student:
+
+                messagebox.showerror(
+                    "Not Found",
+                    "Student not found.",
+                    parent=window
+                )
+
+                return
+
+            confirm = messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete student:\n\n"
+                f"{student[1]}\n"
+                f"Admission ID: {student[0]}\n\n"
+                f"This action cannot be undone.",
+                parent=window
+            )
+
+            if confirm:
+
+                success, msg = self.db.delete_student(
+                    value
+                )
+
+                if success:
+
+                    messagebox.showinfo(
+                        "Deleted",
+                        msg,
+                        parent=window
+                    )
+
+                    window.destroy()
+                    self.refresh_dashboard()
+
+                else:
+
+                    messagebox.showerror(
+                        "Error",
+                        msg,
+                        parent=window
+                    )
+
+        tk.Button(
+            window,
+            text="Delete Student",
+            command=delete,
+            bg=self.RED,
+            fg="white",
+            activebackground="#B91C1C",
+            bd=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+            padx=35,
+            pady=12
+        ).pack()
+
+    # ========================================================
+    # ALL STUDENTS
+    # ========================================================
+
+    def open_all_students(self):
+
+        window = tk.Toplevel(self)
+
+        window.title("All Students")
+        window.geometry("1250x750")
+        window.minsize(1000, 600)
+        window.configure(bg=self.LIGHT)
+
+        tk.Label(
+            window,
+            text="All Students",
+            font=("Segoe UI Semibold", 25),
+            fg=self.TEXT,
+            bg=self.LIGHT
+        ).pack(
+            anchor="w",
+            padx=30,
+            pady=(25, 5)
+        )
+
+        table_frame = tk.Frame(
+            window,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        table_frame.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=15
+        )
+
+        columns = (
+            "ID",
+            "Admission ID",
+            "Name",
+            "Gender",
+            "Class",
+            "Division",
+            "Roll No",
+            "Phone",
+            "Email",
+            "Guardian",
+            "Admission Date"
+        )
+
+        tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings"
+        )
+
+        widths = [
+            50,
+            110,
+            180,
+            80,
+            70,
+            80,
+            70,
+            120,
+            170,
+            150,
+            110
+        ]
+
+        for col, width in zip(columns, widths):
+
+            tree.heading(
+                col,
+                text=col
+            )
+
+            tree.column(
+                col,
+                width=width,
+                anchor="center"
+            )
+
+        y_scroll = ttk.Scrollbar(
+            table_frame,
+            orient="vertical",
+            command=tree.yview
+        )
+
+        x_scroll = ttk.Scrollbar(
+            table_frame,
+            orient="horizontal",
+            command=tree.xview
+        )
+
+        tree.configure(
+            yscrollcommand=y_scroll.set,
+            xscrollcommand=x_scroll.set
+        )
+
+        tree.pack(
+            side="top",
+            fill="both",
+            expand=True
+        )
+
+        x_scroll.pack(
+            side="bottom",
+            fill="x"
+        )
+
+        y_scroll.pack(
+            side="right",
+            fill="y"
+        )
+
+        rows = self.db.get_all()
+
+        for row in rows:
+
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8],
+                    row[9],
+                    row[10]
+                )
+            )
+
+    # ========================================================
+    # STUDENT ID CARD
+    # ========================================================
+
+    def open_id_card(self):
+
+        window = tk.Toplevel(self)
+
+        window.title("Student ID Card")
+        window.geometry("1100x700")
+        window.minsize(950, 600)
+        window.configure(bg=self.LIGHT)
+
+        tk.Label(
+            window,
+            text="Student ID Card",
+            font=("Segoe UI Semibold", 25),
+            fg=self.TEXT,
+            bg=self.LIGHT
+        ).pack(
+            anchor="w",
+            padx=30,
+            pady=(25, 3)
+        )
+
+        tk.Label(
+            window,
+            text="Search student by Admission ID",
+            font=("Segoe UI", 10),
+            fg=self.GRAY,
+            bg=self.LIGHT
+        ).pack(
+            anchor="w",
+            padx=30
+        )
+
+        # ====================================================
+        # SEARCH
+        # ====================================================
+
+        search_frame = tk.Frame(
+            window,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        search_frame.pack(
+            fill="x",
+            padx=30,
+            pady=15
+        )
+
+        admission_var = tk.StringVar()
+
+        entry = tk.Entry(
+            search_frame,
+            textvariable=admission_var,
+            font=("Segoe UI", 11),
+            relief="solid",
+            bd=1
+        )
+
+        entry.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=15,
+            pady=12,
+            ipady=6
+        )
+
+        # IMPORTANT:
+        # Generate ID Card removed.
+        # New button is Student ID.
+        search_button = tk.Button(
+            search_frame,
+            text="Student ID",
+            bg=self.BLUE,
+            fg="white",
+            activebackground=self.BLUE2,
+            activeforeground="white",
+            bd=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+            padx=30,
+            pady=11
+        )
+
+        search_button.pack(
+            side="right",
+            padx=15
+        )
+
+        # ====================================================
+        # CONTENT
+        # ====================================================
+
+        content = tk.Frame(
+            window,
+            bg=self.LIGHT
+        )
+
+        content.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=(0, 25)
+        )
+
+        # ====================================================
+        # LEFT
+        # ====================================================
+
+        left_panel = tk.Frame(
+            content,
+            bg="white",
+            width=390,
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        left_panel.pack(
+            side="left",
+            fill="y",
+            padx=(0, 15)
+        )
+
+        left_panel.pack_propagate(False)
+
+        tk.Label(
+            left_panel,
+            text="Student Details",
+            font=("Segoe UI Semibold", 17),
+            fg=self.TEXT,
+            bg="white"
+        ).pack(
+            anchor="w",
+            padx=20,
+            pady=(20, 3)
+        )
+
+        tk.Label(
+            left_panel,
+            text="Student information",
+            font=("Segoe UI", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).pack(
+            anchor="w",
+            padx=20
+        )
+
+        photo_preview = tk.Label(
+            left_panel,
+            text="STUDENT\nPHOTO",
+            bg="#E9EEF5",
+            fg=self.GRAY,
+            font=("Segoe UI Semibold", 10),
+            width=18,
+            height=9
+        )
+
+        photo_preview.pack(
+            pady=18
+        )
+
+        details_frame = tk.Frame(
+            left_panel,
+            bg="white"
+        )
+
+        details_frame.pack(
+            fill="x",
+            padx=20
+        )
+
+        detail_labels = {}
+
+        detail_names = [
+            "Name",
+            "Admission ID",
+            "Roll No",
+            "Class",
+            "Division",
+            "Gender",
+            "Phone"
+        ]
+
+        for detail in detail_names:
+
+            row = tk.Frame(
+                details_frame,
+                bg="white"
+            )
+
+            row.pack(
+                fill="x",
+                pady=4
+            )
+
+            tk.Label(
+                row,
+                text=detail,
+                width=13,
+                anchor="w",
+                font=("Segoe UI Semibold", 9),
+                fg=self.GRAY,
+                bg="white"
+            ).pack(
+                side="left"
+            )
+
+            value = tk.Label(
+                row,
+                text="-",
+                anchor="w",
+                font=("Segoe UI Semibold", 9),
+                fg=self.TEXT,
+                bg="white"
+            )
+
+            value.pack(
+                side="left",
+                fill="x",
+                expand=True
+            )
+
+            detail_labels[detail] = value
+
+        show_button = tk.Button(
+            left_panel,
+            text="Show ID Card",
+            state="disabled",
+            bg=self.GREEN,
+            fg="white",
+            activebackground="#15803D",
+            activeforeground="white",
+            bd=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+            padx=30,
+            pady=11
+        )
+
+        show_button.pack(
+            side="bottom",
+            pady=20
+        )
+
+        # ====================================================
+        # RIGHT
+        # ====================================================
+
+        right_panel = tk.Frame(
+            content,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        right_panel.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        tk.Label(
+            right_panel,
+            text="ID Card Preview",
+            font=("Segoe UI Semibold", 17),
+            fg=self.TEXT,
+            bg="white"
+        ).pack(
+            anchor="w",
+            padx=20,
+            pady=(18, 3)
+        )
+
+        tk.Label(
+            right_panel,
+            text="Student identification card",
+            font=("Segoe UI", 9),
+            fg=self.GRAY,
+            bg="white"
+        ).pack(
+            anchor="w",
+            padx=20
+        )
+
+        card_container = tk.Frame(
+            right_panel,
+            bg="white"
+        )
+
+        card_container.pack(
+            fill="both",
+            expand=True
+        )
+
+        current_student = {
+            "row": None
+        }
+
+        # ====================================================
+        # SEARCH STUDENT
+        # ====================================================
+
+        def search_student():
+
+            admission_id = admission_var.get().strip()
+
+            if not admission_id:
+
+                messagebox.showwarning(
+                    "Required",
+                    "Please enter Admission ID.",
+                    parent=window
+                )
+
+                return
+
+            row = self.db.get_student(
+                admission_id
+            )
+
+            if not row:
+
+                messagebox.showerror(
+                    "Student Not Found",
+                    "No student found with this Admission ID.",
+                    parent=window
+                )
+
+                return
+
+            current_student["row"] = row
+
+            detail_labels["Name"].config(
+                text=row[1] or "-"
+            )
+
+            detail_labels["Admission ID"].config(
+                text=row[0] or "-"
+            )
+
+            detail_labels["Roll No"].config(
+                text=row[6] or "-"
+            )
+
+            detail_labels["Class"].config(
+                text=row[4] or "-"
+            )
+
+            detail_labels["Division"].config(
+                text=row[5] or "-"
+            )
+
+            detail_labels["Gender"].config(
+                text=row[3] or "-"
+            )
+
+            detail_labels["Phone"].config(
+                text=row[7] or "-"
+            )
+
+            # Photo
+            photo_path = row[12]
+
+            if (
+                photo_path
+                and os.path.exists(photo_path)
+                and PIL_AVAILABLE
+            ):
+
+                try:
+
+                    image = Image.open(
+                        photo_path
+                    )
+
+                    image.thumbnail(
+                        (135, 150)
+                    )
+
+                    photo = ImageTk.PhotoImage(
+                        image
+                    )
+
+                    photo_preview.config(
+                        image=photo,
+                        text=""
+                    )
+
+                    photo_preview.image = photo
+
+                except:
+
+                    photo_preview.config(
+                        image="",
+                        text="PHOTO\nERROR"
+                    )
+
+            else:
+
+                photo_preview.config(
+                    image="",
+                    text="STUDENT\nPHOTO"
+                )
+
+                photo_preview.image = None
+
+            show_button.config(
+                state="normal"
+            )
+
+            for widget in card_container.winfo_children():
+                widget.destroy()
+
+            tk.Label(
+                card_container,
+                text="Student found successfully.\n\n"
+                     "Click  \"Show ID Card\"  to display the card.",
+                font=("Segoe UI", 11),
+                fg=self.GRAY,
+                bg="white",
+                justify="center"
+            ).pack(
+                expand=True
+            )
+
+        # ====================================================
+        # SHOW ID CARD
+        # ====================================================
+
+        def show_id_card():
+
+            row = current_student["row"]
+
+            if not row:
+                return
+
+            for widget in card_container.winfo_children():
+                widget.destroy()
+
+            card = tk.Frame(
+                card_container,
+                bg="white",
+                width=540,
+                height=390,
+                highlightbackground=self.NAVY,
+                highlightthickness=2
+            )
+
+            card.pack(
+                pady=20
+            )
+
+            card.pack_propagate(False)
+
+            # Header
+            header = tk.Frame(
+                card,
+                bg=self.NAVY,
+                height=85
+            )
+
+            header.pack(
+                fill="x"
+            )
+
+            header.pack_propagate(False)
+
+            tk.Label(
+                header,
+                text=SCHOOL_NAME,
+                font=("Segoe UI Black", 15),
+                fg="white",
+                bg=self.NAVY
+            ).pack(
+                pady=(12, 0)
+            )
+
+            tk.Label(
+                header,
+                text="STUDENT IDENTIFICATION CARD",
+                font=("Segoe UI Semibold", 9),
+                fg="#CBD5E1",
+                bg=self.NAVY
+            ).pack()
+
+            # Body
+            body = tk.Frame(
+                card,
+                bg="white"
+            )
+
+            body.pack(
+                fill="both",
+                expand=True,
+                padx=22,
+                pady=18
+            )
+
+            # Photo
+            photo_frame = tk.Frame(
+                body,
+                bg="#E8EEF7",
+                width=120,
+                height=145
+            )
+
+            photo_frame.pack(
+                side="left",
+                padx=(0, 22)
+            )
+
+            photo_frame.pack_propagate(False)
+
+            photo_path = row[12]
+
+            if (
+                photo_path
+                and os.path.exists(photo_path)
+                and PIL_AVAILABLE
+            ):
+
+                try:
+
+                    image = Image.open(
+                        photo_path
+                    )
+
+                    image.thumbnail(
+                        (115, 140)
+                    )
+
+                    card_photo = ImageTk.PhotoImage(
+                        image
+                    )
+
+                    label = tk.Label(
+                        photo_frame,
+                        image=card_photo,
+                        bg="#E8EEF7"
+                    )
+
+                    label.image = card_photo
+
+                    label.pack(
+                        expand=True
+                    )
+
+                except:
+
+                    tk.Label(
+                        photo_frame,
+                        text="PHOTO",
+                        bg="#E8EEF7",
+                        fg=self.GRAY
+                    ).pack(
+                        expand=True
+                    )
+
+            else:
+
+                tk.Label(
+                    photo_frame,
+                    text="PHOTO\nNOT\nAVAILABLE",
+                    bg="#E8EEF7",
+                    fg=self.GRAY,
+                    font=("Segoe UI", 8)
+                ).pack(
+                    expand=True
+                )
+
+            # Details
+            details = tk.Frame(
+                body,
+                bg="white"
+            )
+
+            details.pack(
+                side="left",
+                fill="both",
+                expand=True
+            )
+
+            data = [
+                ("Name", row[1]),
+                ("Admission ID", row[0]),
+                ("Roll No", row[6]),
+                ("Class", f"{row[4]} - {row[5]}"),
+                ("Gender", row[3]),
+                ("Phone", row[7])
+            ]
+
+            for label_text, value in data:
+
+                line = tk.Frame(
+                    details,
+                    bg="white"
+                )
+
+                line.pack(
+                    fill="x",
+                    pady=3
+                )
+
+                tk.Label(
+                    line,
+                    text=label_text,
+                    width=12,
+                    anchor="w",
+                    font=("Segoe UI Semibold", 8),
+                    fg=self.GRAY,
+                    bg="white"
+                ).pack(
+                    side="left"
+                )
+
+                tk.Label(
+                    line,
+                    text=value or "-",
+                    anchor="w",
+                    font=("Segoe UI Semibold", 9),
+                    fg=self.TEXT,
+                    bg="white"
+                ).pack(
+                    side="left"
+                )
+
+            # Footer
+            footer = tk.Frame(
+                card,
+                bg=self.BLUE,
+                height=35
+            )
+
+            footer.pack(
+                fill="x",
+                side="bottom"
+            )
+
+            footer.pack_propagate(False)
+
+            tk.Label(
+                footer,
+                text="Valid Student Identification Card",
+                font=("Segoe UI Semibold", 8),
+                fg="white",
+                bg=self.BLUE
+            ).pack(
+                pady=8
+            )
+
+        search_button.config(
+            command=search_student
+        )
+
+        show_button.config(
+            command=show_id_card
+        )
+
+        entry.bind(
+            "<Return>",
+            lambda e: search_student()
+        )
+
+    # ========================================================
+    # REPORTS / EXPORT
+    # ========================================================
+
+    def open_reports(self):
+
+        window = tk.Toplevel(self)
+
+        window.title("Reports / Export")
+        window.geometry("700x500")
+        window.configure(bg=self.LIGHT)
+
+        tk.Label(
+            window,
+            text="Reports & Export",
+            font=("Segoe UI Semibold", 25),
+            fg=self.TEXT,
+            bg=self.LIGHT
+        ).pack(
+            anchor="w",
+            padx=30,
+            pady=(30, 5)
+        )
+
+        tk.Label(
+            window,
+            text="Export student database and view statistics",
+            font=("Segoe UI", 10),
+            fg=self.GRAY,
+            bg=self.LIGHT
+        ).pack(
+            anchor="w",
+            padx=30
+        )
+
+        # Statistics
+        total, boys, girls, classes, class_data = self.db.statistics()
+
+        stats = tk.Frame(
+            window,
+            bg="white",
+            highlightbackground=self.BORDER,
+            highlightthickness=1
+        )
+
+        stats.pack(
+            fill="x",
+            padx=30,
+            pady=25
+        )
+
+        values = [
+            ("Total Students", total),
+            ("Boys", boys),
+            ("Girls", girls),
+            ("Classes", classes)
+        ]
+
+        for title, value in values:
+
+            box = tk.Frame(
+                stats,
+                bg="white"
+            )
+
+            box.pack(
+                side="left",
+                fill="x",
+                expand=True,
+                padx=10,
+                pady=20
+            )
+
+            tk.Label(
+                box,
+                text=str(value),
+                font=("Segoe UI Black", 22),
+                fg=self.BLUE,
+                bg="white"
+            ).pack()
+
+            tk.Label(
+                box,
+                text=title,
+                font=("Segoe UI Semibold", 8),
+                fg=self.GRAY,
+                bg="white"
+            ).pack()
+
+        def export_csv():
+
+            rows = self.db.get_all()
+
+            if not rows:
+
+                messagebox.showwarning(
+                    "No Data",
+                    "There are no students to export.",
+                    parent=window
+                )
+
+                return
+
+            path = filedialog.asksaveasfilename(
+                parent=window,
+                title="Save Student CSV",
+                defaultextension=".csv",
+                filetypes=[
+                    ("CSV Files", "*.csv")
+                ],
+                initialfile="students.csv"
+            )
+
+            if not path:
+                return
+
+            try:
+
+                with open(
+                    path,
+                    "w",
+                    newline="",
+                    encoding="utf-8-sig"
+                ) as file:
+
+                    writer = csv.writer(file)
+
+                    writer.writerow([
+                        "ID",
+                        "Admission ID",
+                        "Name",
+                        "Gender",
+                        "Class",
+                        "Division",
+                        "Roll No",
+                        "Phone",
+                        "Email",
+                        "Guardian",
+                        "Admission Date"
+                    ])
+
+                    for row in rows:
+                        writer.writerow(row[:11])
+
+                messagebox.showinfo(
+                    "Export Complete",
+                    f"CSV exported successfully.\n\n{path}",
+                    parent=window
+                )
+
+            except Exception as e:
+
+                messagebox.showerror(
+                    "Export Error",
+                    str(e),
+                    parent=window
+                )
+
+        tk.Button(
+            window,
+            text="Export Student Data to CSV",
+            command=export_csv,
+            bg=self.BLUE,
+            fg="white",
+            activebackground=self.BLUE2,
+            bd=0,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+            padx=35,
+            pady=13
+        ).pack(
+            pady=10
+        )
+
+        tk.Label(
+            window,
+            text=f"Database: {DB_PATH}",
+            font=("Segoe UI", 8),
+            fg=self.GRAY,
+            bg=self.LIGHT
+        ).pack(
+            pady=15
+        )
+
+
+# ============================================================
+# START APPLICATION
+# ============================================================
+
+if __name__ == "__main__":
+
+    app = StudentManagementSystem()
+
+    app.mainloop()
