@@ -1,0 +1,3184 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import sqlite3
+import csv
+import os
+from datetime import datetime
+
+
+# ============================================================
+# APP CONFIG
+# ============================================================
+
+APP_NAME = "Finova"
+APP_TITLE = "Finova — Expense & Budget Management"
+VERSION = "Day 02 / 100"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+DB_FILE = os.path.join(DATA_DIR, "finova.db")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+class Database:
+
+    def __init__(self):
+        self.create_tables()
+
+    def connect(self):
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def create_tables(self):
+
+        conn = self.connect()
+        cur = conn.cursor()
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                amount REAL NOT NULL,
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS budgets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                month TEXT UNIQUE NOT NULL,
+                amount REAL NOT NULL
+            )
+        """)
+
+        conn.commit()
+        conn.close()
+
+    def add_transaction(self, date, t_type, category, amount, note):
+
+        conn = self.connect()
+
+        conn.execute("""
+            INSERT INTO transactions
+            (date, type, category, amount, note)
+            VALUES (?, ?, ?, ?, ?)
+        """, (date, t_type, category, amount, note))
+
+        conn.commit()
+        conn.close()
+
+    def update_transaction(
+        self,
+        transaction_id,
+        date,
+        t_type,
+        category,
+        amount,
+        note
+    ):
+
+        conn = self.connect()
+
+        conn.execute("""
+            UPDATE transactions
+            SET date=?,
+                type=?,
+                category=?,
+                amount=?,
+                note=?
+            WHERE id=?
+        """, (
+            date,
+            t_type,
+            category,
+            amount,
+            note,
+            transaction_id
+        ))
+
+        conn.commit()
+        conn.close()
+
+    def delete_transaction(self, transaction_id):
+
+        conn = self.connect()
+
+        conn.execute(
+            "DELETE FROM transactions WHERE id=?",
+            (transaction_id,)
+        )
+
+        conn.commit()
+        conn.close()
+
+    def get_transaction(self, transaction_id):
+
+        conn = self.connect()
+
+        row = conn.execute("""
+            SELECT *
+            FROM transactions
+            WHERE id=?
+        """, (transaction_id,)).fetchone()
+
+        conn.close()
+
+        return row
+
+    def get_transactions(
+        self,
+        keyword="",
+        t_type="All",
+        month="All"
+    ):
+
+        conn = self.connect()
+
+        query = """
+            SELECT *
+            FROM transactions
+            WHERE 1=1
+        """
+
+        params = []
+
+        if keyword:
+
+            query += """
+                AND (
+                    category LIKE ?
+                    OR note LIKE ?
+                    OR date LIKE ?
+                )
+            """
+
+            search = "%" + keyword + "%"
+
+            params.extend([
+                search,
+                search,
+                search
+            ])
+
+        if t_type != "All":
+
+            query += """
+                AND type=?
+            """
+
+            params.append(t_type)
+
+        if month != "All":
+
+            query += """
+                AND substr(date,1,7)=?
+            """
+
+            params.append(month)
+
+        query += """
+            ORDER BY date DESC, id DESC
+        """
+
+        rows = conn.execute(
+            query,
+            params
+        ).fetchall()
+
+        conn.close()
+
+        return rows
+
+    def summary(self, month):
+
+        conn = self.connect()
+
+        row = conn.execute("""
+            SELECT
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN type='Income'
+                            THEN amount
+                            ELSE 0
+                        END
+                    ), 0
+                ) income,
+
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN type='Expense'
+                            THEN amount
+                            ELSE 0
+                        END
+                    ), 0
+                ) expense
+
+            FROM transactions
+            WHERE substr(date,1,7)=?
+        """, (month,)).fetchone()
+
+        conn.close()
+
+        income = float(row["income"])
+        expense = float(row["expense"])
+
+        return {
+            "income": income,
+            "expense": expense,
+            "balance": income - expense
+        }
+
+    def categories(self, month):
+
+        conn = self.connect()
+
+        rows = conn.execute("""
+            SELECT
+                category,
+                SUM(amount) total
+            FROM transactions
+            WHERE type='Expense'
+            AND substr(date,1,7)=?
+            GROUP BY category
+            ORDER BY total DESC
+        """, (month,)).fetchall()
+
+        conn.close()
+
+        return rows
+
+    def set_budget(self, month, amount):
+
+        conn = self.connect()
+
+        conn.execute("""
+            INSERT INTO budgets(month, amount)
+            VALUES (?, ?)
+            ON CONFLICT(month)
+            DO UPDATE SET amount=excluded.amount
+        """, (month, amount))
+
+        conn.commit()
+        conn.close()
+
+    def get_budget(self, month):
+
+        conn = self.connect()
+
+        row = conn.execute("""
+            SELECT amount
+            FROM budgets
+            WHERE month=?
+        """, (month,)).fetchone()
+
+        conn.close()
+
+        if row:
+            return float(row["amount"])
+
+        return 0
+
+    def months(self):
+
+        conn = self.connect()
+
+        rows = conn.execute("""
+            SELECT DISTINCT substr(date,1,7) month
+            FROM transactions
+            ORDER BY month DESC
+        """).fetchall()
+
+        conn.close()
+
+        result = [
+            r["month"]
+            for r in rows
+            if r["month"]
+        ]
+
+        current = datetime.now().strftime("%Y-%m")
+
+        if current not in result:
+            result.insert(0, current)
+
+        return result
+
+
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
+
+class Finova(tk.Tk):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.db = Database()
+
+        self.colors = {
+            "bg": "#F5F7FB",
+            "white": "#FFFFFF",
+            "navy": "#0B1736",
+            "navy2": "#14244D",
+            "blue": "#2563EB",
+            "blue2": "#3B82F6",
+            "green": "#16A34A",
+            "red": "#DC2626",
+            "orange": "#EA580C",
+            "purple": "#7C3AED",
+            "text": "#172033",
+            "muted": "#64748B",
+            "border": "#E2E8F0",
+            "soft_blue": "#EFF6FF",
+            "soft_green": "#F0FDF4",
+            "soft_red": "#FEF2F2",
+            "soft_orange": "#FFF7ED"
+        }
+
+        self.title(APP_TITLE)
+        self.geometry("1450x850")
+        self.minsize(1150, 700)
+        self.configure(
+            bg=self.colors["bg"]
+        )
+
+        self.setup_styles()
+
+        self.current_page = None
+        self.startup_animation()
+
+    # ========================================================
+    # STYLE
+    # ========================================================
+
+    def setup_styles(self):
+
+        style = ttk.Style(self)
+
+        try:
+            style.theme_use("clam")
+        except:
+            pass
+
+        style.configure(
+            "Treeview",
+            background=self.colors["white"],
+            fieldbackground=self.colors["white"],
+            foreground=self.colors["text"],
+            rowheight=38,
+            borderwidth=0,
+            font=("Segoe UI", 9)
+        )
+
+        style.configure(
+            "Treeview.Heading",
+            background=self.colors["navy"],
+            foreground="white",
+            font=("Segoe UI Semibold", 9),
+            padding=10
+        )
+
+        style.map(
+            "Treeview",
+            background=[
+                ("selected", "#DBEAFE")
+            ],
+            foreground=[
+                ("selected", self.colors["text"])
+            ]
+        )
+
+        style.configure(
+            "TCombobox",
+            padding=7,
+            font=("Segoe UI", 9)
+        )
+
+    # ========================================================
+    # STARTUP ANIMATION
+    # ========================================================
+
+    def startup_animation(self):
+
+        self.splash = tk.Frame(
+            self,
+            bg=self.colors["navy"]
+        )
+
+        self.splash.place(
+            relx=0,
+            rely=0,
+            relwidth=1,
+            relheight=1
+        )
+
+        self.logo_text = tk.Label(
+            self.splash,
+            text="FINOVA",
+            bg=self.colors["navy"],
+            fg="white",
+            font=("Segoe UI Black", 42)
+        )
+
+        self.logo_text.place(
+            relx=.5,
+            rely=.42,
+            anchor="center"
+        )
+
+        self.tagline = tk.Label(
+            self.splash,
+            text="SMART PERSONAL FINANCE",
+            bg=self.colors["navy"],
+            fg="#93C5FD",
+            font=("Segoe UI Semibold", 10)
+        )
+
+        self.tagline.place(
+            relx=.5,
+            rely=.50,
+            anchor="center"
+        )
+
+        self.progress_bg = tk.Frame(
+            self.splash,
+            bg="#24375F",
+            width=280,
+            height=5
+        )
+
+        self.progress_bg.place(
+            relx=.5,
+            rely=.57,
+            anchor="center"
+        )
+
+        self.progress = tk.Frame(
+            self.progress_bg,
+            bg=self.colors["blue"],
+            width=0,
+            height=5
+        )
+
+        self.progress.place(
+            x=0,
+            y=0
+        )
+
+        self.animate_startup(0)
+
+    def animate_startup(self, value):
+
+        if value <= 100:
+
+            width = int(280 * value / 100)
+
+            self.progress.place(
+                x=0,
+                y=0,
+                width=width,
+                height=5
+            )
+
+            self.after(
+                12,
+                lambda: self.animate_startup(
+                    value + 2
+                )
+            )
+
+        else:
+
+            self.after(
+                350,
+                self.finish_startup
+            )
+
+    def finish_startup(self):
+
+        self.splash.destroy()
+
+        self.create_layout()
+
+        self.show_dashboard()
+
+    # ========================================================
+    # LAYOUT
+    # ========================================================
+
+    def create_layout(self):
+
+        self.sidebar = tk.Frame(
+            self,
+            bg=self.colors["navy"],
+            width=250
+        )
+
+        self.sidebar.pack(
+            side="left",
+            fill="y"
+        )
+
+        self.sidebar.pack_propagate(False)
+
+        self.content = tk.Frame(
+            self,
+            bg=self.colors["bg"]
+        )
+
+        self.content.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        self.build_sidebar()
+
+    # ========================================================
+    # SIDEBAR
+    # ========================================================
+
+    def build_sidebar(self):
+
+        logo = tk.Frame(
+            self.sidebar,
+            bg=self.colors["navy"]
+        )
+
+        logo.pack(
+            fill="x",
+            padx=24,
+            pady=(28, 28)
+        )
+
+        tk.Label(
+            logo,
+            text="FINOVA",
+            bg=self.colors["navy"],
+            fg="white",
+            font=("Segoe UI Black", 25)
+        ).pack(
+            anchor="w"
+        )
+
+        tk.Label(
+            logo,
+            text="SMART FINANCE SYSTEM",
+            bg=self.colors["navy"],
+            fg="#60A5FA",
+            font=("Segoe UI Semibold", 8)
+        ).pack(
+            anchor="w",
+            pady=(2, 0)
+        )
+
+        tk.Frame(
+            self.sidebar,
+            height=1,
+            bg="#20345C"
+        ).pack(
+            fill="x",
+            padx=20,
+            pady=(0, 15)
+        )
+
+        self.nav_buttons = []
+
+        self.add_nav(
+            "⌂",
+            "Dashboard",
+            self.show_dashboard
+        )
+
+        self.add_nav(
+            "+",
+            "Add Transaction",
+            self.open_add
+        )
+
+        self.add_nav(
+            "₹",
+            "Monthly Budget",
+            self.open_budget
+        )
+
+        self.add_nav(
+            "☷",
+            "Transactions",
+            self.open_transactions
+        )
+
+        self.add_nav(
+            "▥",
+            "Reports & Export",
+            self.open_reports
+        )
+
+        bottom = tk.Frame(
+            self.sidebar,
+            bg=self.colors["navy"]
+        )
+
+        bottom.pack(
+            side="bottom",
+            fill="x",
+            padx=24,
+            pady=22
+        )
+
+        tk.Label(
+            bottom,
+            text="SYSTEM STATUS",
+            bg=self.colors["navy"],
+            fg="#64748B",
+            font=("Segoe UI Semibold", 8)
+        ).pack(
+            anchor="w"
+        )
+
+        tk.Label(
+            bottom,
+            text="●  DATABASE CONNECTED",
+            bg=self.colors["navy"],
+            fg="#4ADE80",
+            font=("Segoe UI", 8)
+        ).pack(
+            anchor="w",
+            pady=(5, 0)
+        )
+
+        tk.Label(
+            bottom,
+            text=VERSION,
+            bg=self.colors["navy"],
+            fg="#64748B",
+            font=("Segoe UI", 8)
+        ).pack(
+            anchor="w",
+            pady=(8, 0)
+        )
+
+    def add_nav(self, icon, text, command):
+
+        frame = tk.Frame(
+            self.sidebar,
+            bg=self.colors["navy"],
+            cursor="hand2"
+        )
+
+        frame.pack(
+            fill="x",
+            padx=10,
+            pady=3
+        )
+
+        icon_label = tk.Label(
+            frame,
+            text=icon,
+            bg=self.colors["navy"],
+            fg="#94A3B8",
+            font=("Segoe UI Semibold", 13),
+            width=3
+        )
+
+        icon_label.pack(
+            side="left",
+            padx=(8, 0)
+        )
+
+        label = tk.Label(
+            frame,
+            text=text,
+            bg=self.colors["navy"],
+            fg="#D8E2F1",
+            font=("Segoe UI Semibold", 10),
+            anchor="w"
+        )
+
+        label.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            pady=12
+        )
+
+        def enter(event):
+
+            frame.configure(
+                bg=self.colors["navy2"]
+            )
+
+            icon_label.configure(
+                bg=self.colors["navy2"],
+                fg="#60A5FA"
+            )
+
+            label.configure(
+                bg=self.colors["navy2"],
+                fg="white"
+            )
+
+        def leave(event):
+
+            frame.configure(
+                bg=self.colors["navy"]
+            )
+
+            icon_label.configure(
+                bg=self.colors["navy"],
+                fg="#94A3B8"
+            )
+
+            label.configure(
+                bg=self.colors["navy"],
+                fg="#D8E2F1"
+            )
+
+        def click(event):
+
+            command()
+
+        for widget in (
+            frame,
+            icon_label,
+            label
+        ):
+
+            widget.bind(
+                "<Enter>",
+                enter
+            )
+
+            widget.bind(
+                "<Leave>",
+                leave
+            )
+
+            widget.bind(
+                "<Button-1>",
+                click
+            )
+
+        self.nav_buttons.append(frame)
+
+    # ========================================================
+    # PAGE HELPERS
+    # ========================================================
+
+    def clear_content(self):
+
+        for widget in self.content.winfo_children():
+            widget.destroy()
+
+    def page_header(
+        self,
+        title,
+        subtitle
+    ):
+
+        header = tk.Frame(
+            self.content,
+            bg=self.colors["bg"]
+        )
+
+        header.pack(
+            fill="x",
+            padx=32,
+            pady=(28, 15)
+        )
+
+        tk.Label(
+            header,
+            text=title,
+            bg=self.colors["bg"],
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 26)
+        ).pack(
+            anchor="w"
+        )
+
+        tk.Label(
+            header,
+            text=subtitle,
+            bg=self.colors["bg"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 9)
+        ).pack(
+            anchor="w",
+            pady=(3, 0)
+        )
+
+        return header
+
+    def panel(self, parent):
+
+        frame = tk.Frame(
+            parent,
+            bg=self.colors["white"],
+            highlightbackground=self.colors["border"],
+            highlightthickness=1
+        )
+
+        return frame
+
+    # ========================================================
+    # DASHBOARD
+    # ========================================================
+
+    def show_dashboard(self):
+
+        self.current_page = "dashboard"
+
+        self.clear_content()
+
+        header = self.page_header(
+            "Good day 👋",
+            "Here is your financial overview."
+        )
+
+        month_frame = tk.Frame(
+            header,
+            bg=self.colors["bg"]
+        )
+
+        month_frame.pack(
+            side="right",
+            anchor="e"
+        )
+
+        tk.Label(
+            month_frame,
+            text="MONTH",
+            bg=self.colors["bg"],
+            fg=self.colors["muted"],
+            font=("Segoe UI Semibold", 8)
+        ).pack(
+            anchor="w"
+        )
+
+        self.dashboard_month = tk.StringVar(
+            value=datetime.now().strftime("%Y-%m")
+        )
+
+        self.dashboard_combo = ttk.Combobox(
+            month_frame,
+            textvariable=self.dashboard_month,
+            values=self.db.months(),
+            state="readonly",
+            width=14
+        )
+
+        self.dashboard_combo.pack(
+            pady=(3, 0)
+        )
+
+        self.dashboard_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self.refresh_dashboard()
+        )
+
+        # ----------------------------------------------------
+        # CARDS
+        # ----------------------------------------------------
+
+        cards = tk.Frame(
+            self.content,
+            bg=self.colors["bg"]
+        )
+
+        cards.pack(
+            fill="x",
+            padx=32,
+            pady=3
+        )
+
+        self.card_income = self.create_card(
+            cards,
+            "TOTAL INCOME",
+            "₹0",
+            self.colors["green"],
+            self.colors["soft_green"]
+        )
+
+        self.card_expense = self.create_card(
+            cards,
+            "TOTAL EXPENSE",
+            "₹0",
+            self.colors["red"],
+            self.colors["soft_red"]
+        )
+
+        self.card_balance = self.create_card(
+            cards,
+            "CURRENT BALANCE",
+            "₹0",
+            self.colors["blue"],
+            self.colors["soft_blue"]
+        )
+
+        self.card_budget = self.create_card(
+            cards,
+            "BUDGET REMAINING",
+            "₹0",
+            self.colors["orange"],
+            self.colors["soft_orange"]
+        )
+
+        # ----------------------------------------------------
+        # BUDGET
+        # ----------------------------------------------------
+
+        budget_panel = self.panel(
+            self.content
+        )
+
+        budget_panel.pack(
+            fill="x",
+            padx=37,
+            pady=15
+        )
+
+        budget_top = tk.Frame(
+            budget_panel,
+            bg=self.colors["white"]
+        )
+
+        budget_top.pack(
+            fill="x",
+            padx=18,
+            pady=(15, 7)
+        )
+
+        self.budget_text = tk.Label(
+            budget_top,
+            text="Monthly Budget",
+            bg=self.colors["white"],
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 10)
+        )
+
+        self.budget_text.pack(
+            side="left"
+        )
+
+        self.budget_percent = tk.Label(
+            budget_top,
+            text="0%",
+            bg=self.colors["white"],
+            fg=self.colors["muted"],
+            font=("Segoe UI Semibold", 9)
+        )
+
+        self.budget_percent.pack(
+            side="right"
+        )
+
+        self.budget_bar_bg = tk.Frame(
+            budget_panel,
+            bg="#E8EDF5",
+            height=9
+        )
+
+        self.budget_bar_bg.pack(
+            fill="x",
+            padx=18,
+            pady=(0, 7)
+        )
+
+        self.budget_bar = tk.Frame(
+            self.budget_bar_bg,
+            bg=self.colors["blue"],
+            height=9
+        )
+
+        self.budget_bar.place(
+            x=0,
+            y=0,
+            width=0,
+            height=9
+        )
+
+        self.budget_status = tk.Label(
+            budget_panel,
+            text="No budget set.",
+            bg=self.colors["white"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 8)
+        )
+
+        self.budget_status.pack(
+            anchor="w",
+            padx=18,
+            pady=(0, 13)
+        )
+
+        # ----------------------------------------------------
+        # GRAPH AREA
+        # ----------------------------------------------------
+
+        graphs = tk.Frame(
+            self.content,
+            bg=self.colors["bg"]
+        )
+
+        graphs.pack(
+            fill="both",
+            expand=True,
+            padx=32,
+            pady=(0, 25)
+        )
+
+        left = self.panel(
+            graphs
+        )
+
+        left.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(5, 8)
+        )
+
+        self.panel_title(
+            left,
+            "Income vs Expense",
+            "Monthly comparison"
+        )
+
+        self.summary_canvas = tk.Canvas(
+            left,
+            bg=self.colors["white"],
+            highlightthickness=0
+        )
+
+        self.summary_canvas.pack(
+            fill="both",
+            expand=True,
+            padx=15,
+            pady=10
+        )
+
+        right = self.panel(
+            graphs
+        )
+
+        right.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(8, 5)
+        )
+
+        self.panel_title(
+            right,
+            "Expense Breakdown",
+            "Top spending categories"
+        )
+
+        self.category_canvas = tk.Canvas(
+            right,
+            bg=self.colors["white"],
+            highlightthickness=0
+        )
+
+        self.category_canvas.pack(
+            fill="both",
+            expand=True,
+            padx=15,
+            pady=10
+        )
+
+        self.summary_canvas.bind(
+            "<Configure>",
+            lambda e: self.refresh_graphs()
+        )
+
+        self.category_canvas.bind(
+            "<Configure>",
+            lambda e: self.refresh_graphs()
+        )
+
+        self.refresh_dashboard()
+
+    def create_card(
+        self,
+        parent,
+        title,
+        value,
+        accent,
+        soft
+    ):
+
+        frame = tk.Frame(
+            parent,
+            bg=self.colors["white"],
+            height=125,
+            highlightbackground=self.colors["border"],
+            highlightthickness=1
+        )
+
+        frame.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=5
+        )
+
+        frame.pack_propagate(False)
+
+        top = tk.Frame(
+            frame,
+            bg=self.colors["white"]
+        )
+
+        top.pack(
+            fill="x",
+            padx=18,
+            pady=(17, 0)
+        )
+
+        icon = tk.Label(
+            top,
+            text="●",
+            bg=soft,
+            fg=accent,
+            font=("Segoe UI", 12),
+            width=3
+        )
+
+        icon.pack(
+            side="left"
+        )
+
+        tk.Label(
+            top,
+            text=title,
+            bg=self.colors["white"],
+            fg=self.colors["muted"],
+            font=("Segoe UI Semibold", 8)
+        ).pack(
+            side="left",
+            padx=9
+        )
+
+        value_label = tk.Label(
+            frame,
+            text=value,
+            bg=self.colors["white"],
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 22)
+        )
+
+        value_label.pack(
+            anchor="w",
+            padx=18,
+            pady=(11, 0)
+        )
+
+        return value_label
+
+    def panel_title(
+        self,
+        parent,
+        title,
+        subtitle
+    ):
+
+        frame = tk.Frame(
+            parent,
+            bg=self.colors["white"]
+        )
+
+        frame.pack(
+            fill="x",
+            padx=20,
+            pady=(17, 0)
+        )
+
+        tk.Label(
+            frame,
+            text=title,
+            bg=self.colors["white"],
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 14)
+        ).pack(
+            anchor="w"
+        )
+
+        tk.Label(
+            frame,
+            text=subtitle,
+            bg=self.colors["white"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 8)
+        ).pack(
+            anchor="w",
+            pady=(2, 0)
+        )
+
+    # ========================================================
+    # ANIMATED NUMBER
+    # ========================================================
+
+    def animate_number(
+        self,
+        label,
+        target,
+        prefix="₹"
+    ):
+
+        try:
+            target = float(target)
+        except:
+            target = 0
+
+        duration = 500
+        steps = 25
+        step_value = target / steps
+        step_time = duration // steps
+
+        def update(step=0):
+
+            if step <= steps:
+
+                value = step_value * step
+
+                label.config(
+                    text=f"{prefix}{value:,.0f}"
+                )
+
+                self.after(
+                    step_time,
+                    lambda: update(step + 1)
+                )
+
+            else:
+
+                label.config(
+                    text=f"{prefix}{target:,.2f}"
+                )
+
+        update()
+
+    def refresh_dashboard(self):
+
+        month = self.dashboard_month.get()
+
+        summary = self.db.summary(
+            month
+        )
+
+        budget = self.db.get_budget(
+            month
+        )
+
+        remaining = (
+            budget -
+            summary["expense"]
+        )
+
+        self.animate_number(
+            self.card_income,
+            summary["income"]
+        )
+
+        self.animate_number(
+            self.card_expense,
+            summary["expense"]
+        )
+
+        self.animate_number(
+            self.card_balance,
+            summary["balance"]
+        )
+
+        if budget > 0:
+
+            self.animate_number(
+                self.card_budget,
+                max(remaining, 0)
+            )
+
+            percent = (
+                summary["expense"] /
+                budget
+            ) * 100
+
+            percent = min(
+                percent,
+                100
+            )
+
+            self.budget_percent.config(
+                text=f"{percent:.0f}%"
+            )
+
+            self.budget_text.config(
+                text=(
+                    f"Monthly Budget  •  "
+                    f"₹{budget:,.2f}"
+                )
+            )
+
+            if percent < 70:
+
+                color = self.colors["green"]
+
+                text = (
+                    f"₹{summary['expense']:,.2f} "
+                    f"spent — budget is under control."
+                )
+
+            elif percent < 100:
+
+                color = self.colors["orange"]
+
+                text = (
+                    f"₹{summary['expense']:,.2f} "
+                    f"spent — approaching budget limit."
+                )
+
+            else:
+
+                color = self.colors["red"]
+
+                text = (
+                    f"₹{summary['expense']:,.2f} "
+                    f"spent — budget exceeded."
+                )
+
+            self.budget_status.config(
+                text=text,
+                fg=color
+            )
+
+            self.animate_progress(
+                percent,
+                color
+            )
+
+        else:
+
+            self.card_budget.config(
+                text="Not Set"
+            )
+
+            self.budget_percent.config(
+                text="0%"
+            )
+
+            self.budget_text.config(
+                text="Monthly Budget"
+            )
+
+            self.budget_status.config(
+                text=(
+                    "No monthly budget set. "
+                    "Open Monthly Budget to create one."
+                ),
+                fg=self.colors["muted"]
+            )
+
+            self.animate_progress(
+                0,
+                self.colors["blue"]
+            )
+
+        self.refresh_graphs()
+
+    # ========================================================
+    # ANIMATED PROGRESS
+    # ========================================================
+
+    def animate_progress(
+        self,
+        percent,
+        color
+    ):
+
+        self.budget_bar.config(
+            bg=color
+        )
+
+        self.budget_bar_bg.update_idletasks()
+
+        max_width = (
+            self.budget_bar_bg.winfo_width()
+        )
+
+        target_width = int(
+            max_width *
+            percent /
+            100
+        )
+
+        def step(width=0):
+
+            if width <= target_width:
+
+                self.budget_bar.place(
+                    x=0,
+                    y=0,
+                    width=width,
+                    height=9
+                )
+
+                self.after(
+                    8,
+                    lambda: step(
+                        width + max(
+                            1,
+                            target_width // 30
+                        )
+                    )
+                )
+
+            else:
+
+                self.budget_bar.place(
+                    x=0,
+                    y=0,
+                    width=target_width,
+                    height=9
+                )
+
+        step()
+
+    # ========================================================
+    # GRAPHS
+    # ========================================================
+
+    def refresh_graphs(self):
+
+        if not hasattr(
+            self,
+            "summary_canvas"
+        ):
+            return
+
+        month = self.dashboard_month.get()
+
+        summary = self.db.summary(
+            month
+        )
+
+        categories = self.db.categories(
+            month
+        )
+
+        self.draw_summary_chart(
+            summary["income"],
+            summary["expense"]
+        )
+
+        self.draw_category_chart(
+            categories
+        )
+
+    def draw_summary_chart(
+        self,
+        income,
+        expense
+    ):
+
+        canvas = self.summary_canvas
+
+        canvas.delete("all")
+
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
+
+        if width < 200 or height < 150:
+            return
+
+        left = 60
+        right = width - 35
+        top = 30
+        bottom = height - 50
+
+        chart_height = bottom - top
+
+        maximum = max(
+            income,
+            expense,
+            1
+        )
+
+        # Grid lines
+        for i in range(5):
+
+            y = (
+                bottom -
+                chart_height *
+                i / 4
+            )
+
+            canvas.create_line(
+                left,
+                y,
+                right,
+                y,
+                fill="#E8EDF5"
+            )
+
+            value = (
+                maximum *
+                i /
+                4
+            )
+
+            canvas.create_text(
+                left - 10,
+                y,
+                text=f"{value:,.0f}",
+                fill=self.colors["muted"],
+                font=("Segoe UI", 7),
+                anchor="e"
+            )
+
+        values = [
+            (
+                "Income",
+                income,
+                self.colors["green"]
+            ),
+            (
+                "Expense",
+                expense,
+                self.colors["red"]
+            )
+        ]
+
+        positions = [
+            width * .38,
+            width * .68
+        ]
+
+        bar_width = min(
+            80,
+            width * .15
+        )
+
+        for i, (
+            name,
+            value,
+            color
+        ) in enumerate(values):
+
+            x = positions[i]
+
+            target_height = (
+                value /
+                maximum *
+                chart_height
+            )
+
+            self.animate_bar(
+                canvas,
+                x,
+                bottom,
+                bar_width,
+                target_height,
+                color,
+                name,
+                value
+            )
+
+    def animate_bar(
+        self,
+        canvas,
+        x,
+        bottom,
+        bar_width,
+        target_height,
+        color,
+        label,
+        value
+    ):
+
+        steps = 20
+        increment = target_height / steps
+
+        def grow(step=0):
+
+            if step <= steps:
+
+                h = increment * step
+
+                canvas.delete(
+                    f"bar_{label}"
+                )
+
+                canvas.create_rectangle(
+                    x - bar_width / 2,
+                    bottom - h,
+                    x + bar_width / 2,
+                    bottom,
+                    fill=color,
+                    outline="",
+                    tags=f"bar_{label}"
+                )
+
+                canvas.delete(
+                    f"text_{label}"
+                )
+
+                canvas.create_text(
+                    x,
+                    bottom - h - 15,
+                    text=f"₹{value:,.0f}",
+                    fill=self.colors["text"],
+                    font=("Segoe UI Semibold", 9),
+                    tags=f"text_{label}"
+                )
+
+                canvas.delete(
+                    f"label_{label}"
+                )
+
+                canvas.create_text(
+                    x,
+                    bottom + 25,
+                    text=label,
+                    fill=self.colors["text"],
+                    font=("Segoe UI Semibold", 9),
+                    tags=f"label_{label}"
+                )
+
+                self.after(
+                    15,
+                    lambda: grow(step + 1)
+                )
+
+        grow()
+
+    def draw_category_chart(
+        self,
+        rows
+    ):
+
+        canvas = self.category_canvas
+
+        canvas.delete("all")
+
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
+
+        if width < 200 or height < 150:
+            return
+
+        if not rows:
+
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="No expense data available",
+                fill=self.colors["muted"],
+                font=("Segoe UI", 10)
+            )
+
+            return
+
+        rows = rows[:6]
+
+        maximum = max(
+            float(row["total"])
+            for row in rows
+        )
+
+        left = 115
+        right = width - 35
+        top = 30
+
+        row_height = min(
+            48,
+            (height - 55) /
+            len(rows)
+        )
+
+        for index, row in enumerate(rows):
+
+            category = row["category"]
+            amount = float(row["total"])
+
+            y = (
+                top +
+                index * row_height +
+                row_height / 2
+            )
+
+            canvas.create_text(
+                left - 10,
+                y,
+                text=category,
+                fill=self.colors["text"],
+                font=("Segoe UI Semibold", 8),
+                anchor="e"
+            )
+
+            background_width = (
+                right - left
+            )
+
+            canvas.create_rectangle(
+                left,
+                y - 9,
+                right,
+                y + 9,
+                fill="#EDF1F7",
+                outline=""
+            )
+
+            target = (
+                amount /
+                maximum *
+                background_width
+            )
+
+            self.animate_category_bar(
+                canvas,
+                left,
+                y,
+                target,
+                amount,
+                row["category"]
+            )
+
+    def animate_category_bar(
+        self,
+        canvas,
+        left,
+        y,
+        target,
+        amount,
+        tag
+    ):
+
+        steps = 18
+
+        def grow(step=0):
+
+            if step <= steps:
+
+                width = (
+                    target *
+                    step /
+                    steps
+                )
+
+                canvas.delete(
+                    f"cat_{tag}"
+                )
+
+                canvas.create_rectangle(
+                    left,
+                    y - 9,
+                    left + width,
+                    y + 9,
+                    fill=self.colors["blue"],
+                    outline="",
+                    tags=f"cat_{tag}"
+                )
+
+                canvas.delete(
+                    f"amt_{tag}"
+                )
+
+                canvas.create_text(
+                    left + width + 7,
+                    y,
+                    text=f"₹{amount:,.0f}",
+                    fill=self.colors["muted"],
+                    font=("Segoe UI Semibold", 8),
+                    anchor="w",
+                    tags=f"amt_{tag}"
+                )
+
+                self.after(
+                    15,
+                    lambda: grow(step + 1)
+                )
+
+        grow()
+
+    # ========================================================
+    # ADD TRANSACTION
+    # ========================================================
+
+    def open_add(self):
+
+        self.form_window(
+            title="Add Transaction",
+            transaction=None
+        )
+
+    # ========================================================
+    # FORM WINDOW
+    # ========================================================
+
+    def form_window(
+        self,
+        title,
+        transaction=None,
+        refresh=None
+    ):
+
+        edit_mode = transaction is not None
+
+        win = tk.Toplevel(self)
+
+        win.title(title)
+        win.geometry("650x650")
+        win.resizable(False, False)
+        win.configure(
+            bg=self.colors["bg"]
+        )
+
+        header = tk.Frame(
+            win,
+            bg=self.colors["navy"],
+            height=95
+        )
+
+        header.pack(
+            fill="x"
+        )
+
+        header.pack_propagate(False)
+
+        tk.Label(
+            header,
+            text=title,
+            bg=self.colors["navy"],
+            fg="white",
+            font=("Segoe UI Semibold", 22)
+        ).pack(
+            anchor="w",
+            padx=28,
+            pady=(19, 0)
+        )
+
+        tk.Label(
+            header,
+            text="Keep your financial records accurate and organized.",
+            bg=self.colors["navy"],
+            fg="#94A3B8",
+            font=("Segoe UI", 8)
+        ).pack(
+            anchor="w",
+            padx=29
+        )
+
+        body = tk.Frame(
+            win,
+            bg=self.colors["white"]
+        )
+
+        body.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=20
+        )
+
+        body.grid_columnconfigure(
+            1,
+            weight=1
+        )
+
+        date_var = tk.StringVar(
+            value=(
+                transaction["date"]
+                if edit_mode
+                else datetime.now().strftime("%Y-%m-%d")
+            )
+        )
+
+        type_var = tk.StringVar(
+            value=(
+                transaction["type"]
+                if edit_mode
+                else "Expense"
+            )
+        )
+
+        category_var = tk.StringVar(
+            value=(
+                transaction["category"]
+                if edit_mode
+                else "Food"
+            )
+        )
+
+        amount_var = tk.StringVar(
+            value=(
+                str(transaction["amount"])
+                if edit_mode
+                else ""
+            )
+        )
+
+        income_categories = [
+            "Salary",
+            "Freelance",
+            "Business",
+            "Investment",
+            "Gift",
+            "Pocket Money",
+            "Other Income"
+        ]
+
+        expense_categories = [
+            "Food",
+            "Travel",
+            "Shopping",
+            "Education",
+            "Bills",
+            "Rent",
+            "Health",
+            "Entertainment",
+            "Mobile / Internet",
+            "Family",
+            "Other Expense"
+        ]
+
+        def field_label(text, row):
+
+            tk.Label(
+                body,
+                text=text,
+                bg=self.colors["white"],
+                fg=self.colors["text"],
+                font=("Segoe UI Semibold", 9)
+            ).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=12,
+                pady=12
+            )
+
+        field_label(
+            "Date",
+            0
+        )
+
+        date_entry = tk.Entry(
+            body,
+            textvariable=date_var,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        )
+
+        date_entry.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=10,
+            pady=10,
+            ipady=7
+        )
+
+        field_label(
+            "Transaction Type",
+            1
+        )
+
+        type_combo = ttk.Combobox(
+            body,
+            textvariable=type_var,
+            values=[
+                "Income",
+                "Expense"
+            ],
+            state="readonly"
+        )
+
+        type_combo.grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=10,
+            pady=10
+        )
+
+        field_label(
+            "Category",
+            2
+        )
+
+        category_combo = ttk.Combobox(
+            body,
+            textvariable=category_var
+        )
+
+        category_combo.grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            padx=10,
+            pady=10
+        )
+
+        def update_categories(event=None):
+
+            old = category_var.get()
+
+            if type_var.get() == "Income":
+
+                values = income_categories
+
+            else:
+
+                values = expense_categories
+
+            category_combo["values"] = values
+
+            if old in values:
+                category_var.set(old)
+            elif not edit_mode:
+                category_var.set(values[0])
+
+        type_combo.bind(
+            "<<ComboboxSelected>>",
+            update_categories
+        )
+
+        update_categories()
+
+        field_label(
+            "Amount (₹)",
+            3
+        )
+
+        tk.Entry(
+            body,
+            textvariable=amount_var,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        ).grid(
+            row=3,
+            column=1,
+            sticky="ew",
+            padx=10,
+            pady=10,
+            ipady=7
+        )
+
+        field_label(
+            "Note",
+            4
+        )
+
+        note = tk.Text(
+            body,
+            height=6,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        )
+
+        note.grid(
+            row=4,
+            column=1,
+            sticky="ew",
+            padx=10,
+            pady=10
+        )
+
+        if edit_mode:
+
+            note.insert(
+                "1.0",
+                transaction["note"] or ""
+            )
+
+        buttons = tk.Frame(
+            win,
+            bg=self.colors["bg"]
+        )
+
+        buttons.pack(
+            fill="x",
+            padx=25,
+            pady=(0, 20)
+        )
+
+        def save():
+
+            date = date_var.get().strip()
+            t_type = type_var.get()
+            category = category_var.get().strip()
+            amount_text = amount_var.get().strip()
+            note_text = note.get(
+                "1.0",
+                "end"
+            ).strip()
+
+            try:
+
+                datetime.strptime(
+                    date,
+                    "%Y-%m-%d"
+                )
+
+            except:
+
+                messagebox.showerror(
+                    "Invalid Date",
+                    "Please use YYYY-MM-DD.",
+                    parent=win
+                )
+
+                return
+
+            if not category:
+
+                messagebox.showerror(
+                    "Missing Category",
+                    "Please select a category.",
+                    parent=win
+                )
+
+                return
+
+            try:
+
+                amount = float(
+                    amount_text
+                )
+
+                if amount <= 0:
+                    raise ValueError
+
+            except:
+
+                messagebox.showerror(
+                    "Invalid Amount",
+                    "Enter a valid amount greater than zero.",
+                    parent=win
+                )
+
+                return
+
+            if edit_mode:
+
+                self.db.update_transaction(
+                    transaction["id"],
+                    date,
+                    t_type,
+                    category,
+                    amount,
+                    note_text
+                )
+
+                message = (
+                    "Transaction updated successfully."
+                )
+
+            else:
+
+                self.db.add_transaction(
+                    date,
+                    t_type,
+                    category,
+                    amount,
+                    note_text
+                )
+
+                message = (
+                    "Transaction added successfully."
+                )
+
+            messagebox.showinfo(
+                "Success",
+                message,
+                parent=win
+            )
+
+            win.destroy()
+
+            self.refresh_after_change()
+
+            if refresh:
+                refresh()
+
+        tk.Button(
+            buttons,
+            text=(
+                "Update Transaction"
+                if edit_mode
+                else "Save Transaction"
+            ),
+            command=save,
+            bg=self.colors["blue"],
+            fg="white",
+            activebackground="#1D4ED8",
+            relief="flat",
+            cursor="hand2",
+            font=("Segoe UI Semibold", 9),
+            padx=24,
+            pady=10
+        ).pack(
+            side="right"
+        )
+
+        tk.Button(
+            buttons,
+            text="Cancel",
+            command=win.destroy,
+            bg="#E2E8F0",
+            fg=self.colors["text"],
+            activebackground="#CBD5E1",
+            relief="flat",
+            cursor="hand2",
+            font=("Segoe UI Semibold", 9),
+            padx=24,
+            pady=10
+        ).pack(
+            side="right",
+            padx=8
+        )
+
+    def refresh_after_change(self):
+
+        if self.current_page == "dashboard":
+            self.refresh_dashboard()
+
+    # ========================================================
+    # BUDGET
+    # ========================================================
+
+    def open_budget(self):
+
+        win = tk.Toplevel(self)
+
+        win.title("Monthly Budget")
+        win.geometry("600x470")
+        win.resizable(False, False)
+        win.configure(
+            bg=self.colors["bg"]
+        )
+
+        header = tk.Frame(
+            win,
+            bg=self.colors["navy"],
+            height=100
+        )
+
+        header.pack(
+            fill="x"
+        )
+
+        header.pack_propagate(False)
+
+        tk.Label(
+            header,
+            text="Monthly Budget",
+            bg=self.colors["navy"],
+            fg="white",
+            font=("Segoe UI Semibold", 23)
+        ).pack(
+            anchor="w",
+            padx=28,
+            pady=(20, 0)
+        )
+
+        tk.Label(
+            header,
+            text="Set a spending limit and stay financially disciplined.",
+            bg=self.colors["navy"],
+            fg="#94A3B8",
+            font=("Segoe UI", 8)
+        ).pack(
+            anchor="w",
+            padx=29
+        )
+
+        body = tk.Frame(
+            win,
+            bg=self.colors["white"]
+        )
+
+        body.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=20
+        )
+
+        month_var = tk.StringVar(
+            value=datetime.now().strftime("%Y-%m")
+        )
+
+        amount_var = tk.StringVar()
+
+        tk.Label(
+            body,
+            text="Month (YYYY-MM)",
+            bg=self.colors["white"],
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 9)
+        ).pack(
+            anchor="w",
+            padx=25,
+            pady=(22, 6)
+        )
+
+        month_entry = tk.Entry(
+            body,
+            textvariable=month_var,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        )
+
+        month_entry.pack(
+            fill="x",
+            padx=25,
+            ipady=7
+        )
+
+        tk.Label(
+            body,
+            text="Budget Amount (₹)",
+            bg=self.colors["white"],
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 9)
+        ).pack(
+            anchor="w",
+            padx=25,
+            pady=(20, 6)
+        )
+
+        amount_entry = tk.Entry(
+            body,
+            textvariable=amount_var,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        )
+
+        amount_entry.pack(
+            fill="x",
+            padx=25,
+            ipady=7
+        )
+
+        current = tk.Label(
+            body,
+            text="Current budget: ₹0",
+            bg=self.colors["white"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 9)
+        )
+
+        current.pack(
+            anchor="w",
+            padx=25,
+            pady=12
+        )
+
+        def load():
+
+            value = self.db.get_budget(
+                month_var.get()
+            )
+
+            current.config(
+                text=f"Current budget: ₹{value:,.2f}"
+            )
+
+        def save():
+
+            month = month_var.get().strip()
+
+            try:
+
+                datetime.strptime(
+                    month,
+                    "%Y-%m"
+                )
+
+            except:
+
+                messagebox.showerror(
+                    "Invalid Month",
+                    "Use YYYY-MM format.",
+                    parent=win
+                )
+
+                return
+
+            try:
+
+                amount = float(
+                    amount_var.get()
+                )
+
+                if amount <= 0:
+                    raise ValueError
+
+            except:
+
+                messagebox.showerror(
+                    "Invalid Budget",
+                    "Enter a valid budget amount.",
+                    parent=win
+                )
+
+                return
+
+            self.db.set_budget(
+                month,
+                amount
+            )
+
+            messagebox.showinfo(
+                "Saved",
+                "Monthly budget saved successfully.",
+                parent=win
+            )
+
+            load()
+
+            self.refresh_after_change()
+
+        month_entry.bind(
+            "<FocusOut>",
+            lambda e: load()
+        )
+
+        tk.Button(
+            body,
+            text="Save Budget",
+            command=save,
+            bg=self.colors["blue"],
+            fg="white",
+            relief="flat",
+            cursor="hand2",
+            font=("Segoe UI Semibold", 9),
+            padx=30,
+            pady=10
+        ).pack(
+            pady=15
+        )
+
+        load()
+
+    # ========================================================
+    # TRANSACTIONS
+    # ========================================================
+
+    def open_transactions(self):
+
+        win = tk.Toplevel(self)
+
+        win.title("Transactions")
+        win.geometry("1250x720")
+        win.minsize(1000, 600)
+        win.configure(
+            bg=self.colors["bg"]
+        )
+
+        self.transactions_window(
+            win
+        )
+
+    def transactions_window(self, win):
+
+        header = self.page_header_window(
+            win,
+            "Transactions",
+            "Search, edit and manage your financial records."
+        )
+
+        controls = tk.Frame(
+            win,
+            bg=self.colors["white"],
+            highlightbackground=self.colors["border"],
+            highlightthickness=1
+        )
+
+        controls.pack(
+            fill="x",
+            padx=30,
+            pady=10
+        )
+
+        search_var = tk.StringVar()
+
+        search = tk.Entry(
+            controls,
+            textvariable=search_var,
+            font=("Segoe UI", 10),
+            relief="solid",
+            bd=1
+        )
+
+        search.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=15,
+            pady=12,
+            ipady=6
+        )
+
+        type_var = tk.StringVar(
+            value="All"
+        )
+
+        type_combo = ttk.Combobox(
+            controls,
+            textvariable=type_var,
+            values=[
+                "All",
+                "Income",
+                "Expense"
+            ],
+            state="readonly",
+            width=12
+        )
+
+        type_combo.pack(
+            side="left",
+            padx=5
+        )
+
+        month_var = tk.StringVar(
+            value="All"
+        )
+
+        month_combo = ttk.Combobox(
+            controls,
+            textvariable=month_var,
+            values=[
+                "All"
+            ] + self.db.months(),
+            state="readonly",
+            width=13
+        )
+
+        month_combo.pack(
+            side="left",
+            padx=(5, 15)
+        )
+
+        table_panel = self.panel(
+            win
+        )
+
+        table_panel.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=5
+        )
+
+        columns = (
+            "ID",
+            "Date",
+            "Type",
+            "Category",
+            "Amount",
+            "Note"
+        )
+
+        tree = ttk.Treeview(
+            table_panel,
+            columns=columns,
+            show="headings",
+            selectmode="browse"
+        )
+
+        widths = {
+            "ID": 60,
+            "Date": 110,
+            "Type": 100,
+            "Category": 170,
+            "Amount": 130,
+            "Note": 400
+        }
+
+        for col in columns:
+
+            tree.heading(
+                col,
+                text=col
+            )
+
+            tree.column(
+                col,
+                width=widths[col],
+                anchor="center"
+            )
+
+        scrollbar = ttk.Scrollbar(
+            table_panel,
+            orient="vertical",
+            command=tree.yview
+        )
+
+        tree.configure(
+            yscrollcommand=scrollbar.set
+        )
+
+        tree.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        scrollbar.pack(
+            side="right",
+            fill="y"
+        )
+
+        def load():
+
+            rows = self.db.get_transactions(
+                search_var.get(),
+                type_var.get(),
+                month_var.get()
+            )
+
+            for item in tree.get_children():
+                tree.delete(item)
+
+            for row in rows:
+
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row["id"],
+                        row["date"],
+                        row["type"],
+                        row["category"],
+                        f"₹{row['amount']:,.2f}",
+                        row["note"]
+                    )
+                )
+
+        search_var.trace_add(
+            "write",
+            lambda *args: load()
+        )
+
+        type_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda e: load()
+        )
+
+        month_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda e: load()
+        )
+
+        buttons = tk.Frame(
+            win,
+            bg=self.colors["bg"]
+        )
+
+        buttons.pack(
+            fill="x",
+            padx=30,
+            pady=(8, 20)
+        )
+
+        def edit():
+
+            selected = tree.selection()
+
+            if not selected:
+
+                messagebox.showwarning(
+                    "Select",
+                    "Please select a transaction.",
+                    parent=win
+                )
+
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            transaction = (
+                self.db.get_transaction(
+                    int(values[0])
+                )
+            )
+
+            self.form_window(
+                "Edit Transaction",
+                transaction,
+                load
+            )
+
+        def delete():
+
+            selected = tree.selection()
+
+            if not selected:
+
+                messagebox.showwarning(
+                    "Select",
+                    "Please select a transaction.",
+                    parent=win
+                )
+
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            answer = messagebox.askyesno(
+                "Delete Transaction",
+                "Delete selected transaction?",
+                parent=win
+            )
+
+            if answer:
+
+                self.db.delete_transaction(
+                    int(values[0])
+                )
+
+                load()
+
+                self.refresh_after_change()
+
+        tk.Button(
+            buttons,
+            text="Edit Selected",
+            command=edit,
+            bg=self.colors["blue"],
+            fg="white",
+            relief="flat",
+            cursor="hand2",
+            font=("Segoe UI Semibold", 9),
+            padx=22,
+            pady=9
+        ).pack(
+            side="left"
+        )
+
+        tk.Button(
+            buttons,
+            text="Delete Selected",
+            command=delete,
+            bg=self.colors["red"],
+            fg="white",
+            relief="flat",
+            cursor="hand2",
+            font=("Segoe UI Semibold", 9),
+            padx=22,
+            pady=9
+        ).pack(
+            side="left",
+            padx=8
+        )
+
+        tk.Button(
+            buttons,
+            text="Refresh",
+            command=load,
+            bg="#E2E8F0",
+            fg=self.colors["text"],
+            relief="flat",
+            cursor="hand2",
+            font=("Segoe UI Semibold", 9),
+            padx=22,
+            pady=9
+        ).pack(
+            side="left"
+        )
+
+        tree.bind(
+            "<Double-1>",
+            lambda e: edit()
+        )
+
+        load()
+
+    def page_header_window(
+        self,
+        win,
+        title,
+        subtitle
+    ):
+
+        frame = tk.Frame(
+            win,
+            bg=self.colors["bg"]
+        )
+
+        frame.pack(
+            fill="x",
+            padx=30,
+            pady=(25, 8)
+        )
+
+        tk.Label(
+            frame,
+            text=title,
+            bg=self.colors["bg"],
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 25)
+        ).pack(
+            anchor="w"
+        )
+
+        tk.Label(
+            frame,
+            text=subtitle,
+            bg=self.colors["bg"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 9)
+        ).pack(
+            anchor="w"
+        )
+
+        return frame
+
+    # ========================================================
+    # REPORTS
+    # ========================================================
+
+    def open_reports(self):
+
+        win = tk.Toplevel(self)
+
+        win.title("Reports & Export")
+        win.geometry("950x680")
+        win.minsize(800, 550)
+        win.configure(
+            bg=self.colors["bg"]
+        )
+
+        self.page_header_window(
+            win,
+            "Reports & Export",
+            "Analyze your monthly finances and export data."
+        )
+
+        controls = tk.Frame(
+            win,
+            bg=self.colors["white"],
+            highlightbackground=self.colors["border"],
+            highlightthickness=1
+        )
+
+        controls.pack(
+            fill="x",
+            padx=30,
+            pady=10
+        )
+
+        month_var = tk.StringVar(
+            value=datetime.now().strftime("%Y-%m")
+        )
+
+        tk.Label(
+            controls,
+            text="Report Month",
+            bg=self.colors["white"],
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 9)
+        ).pack(
+            side="left",
+            padx=(15, 8)
+        )
+
+        combo = ttk.Combobox(
+            controls,
+            textvariable=month_var,
+            values=self.db.months(),
+            state="readonly",
+            width=14
+        )
+
+        combo.pack(
+            side="left",
+            pady=12
+        )
+
+        summary_panel = self.panel(
+            win
+        )
+
+        summary_panel.pack(
+            fill="x",
+            padx=30,
+            pady=8
+        )
+
+        value_labels = {}
+
+        for title, color in [
+            ("Income", self.colors["green"]),
+            ("Expense", self.colors["red"]),
+            ("Balance", self.colors["blue"]),
+            ("Budget", self.colors["orange"])
+        ]:
+
+            f = tk.Frame(
+                summary_panel,
+                bg=self.colors["white"]
+            )
+
+            f.pack(
+                side="left",
+                fill="x",
+                expand=True,
+                pady=18
+            )
+
+            value = tk.Label(
+                f,
+                text="₹0",
+                bg=self.colors["white"],
+                fg=color,
+                font=("Segoe UI Semibold", 18)
+            )
+
+            value.pack()
+
+            tk.Label(
+                f,
+                text=title,
+                bg=self.colors["white"],
+                fg=self.colors["muted"],
+                font=("Segoe UI Semibold", 8)
+            ).pack()
+
+            value_labels[title] = value
+
+        table_panel = self.panel(
+            win
+        )
+
+        table_panel.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=8
+        )
+
+        tree = ttk.Treeview(
+            table_panel,
+            columns=("Category", "Amount"),
+            show="headings"
+        )
+
+        tree.heading(
+            "Category",
+            text="Category"
+        )
+
+        tree.heading(
+            "Amount",
+            text="Amount"
+        )
+
+        tree.column(
+            "Category",
+            width=350
+        )
+
+        tree.column(
+            "Amount",
+            width=200,
+            anchor="center"
+        )
+
+        tree.pack(
+            fill="both",
+            expand=True
+        )
+
+        def load():
+
+            month = month_var.get()
+
+            summary = self.db.summary(
+                month
+            )
+
+            budget = self.db.get_budget(
+                month
+            )
+
+            value_labels["Income"].config(
+                text=f"₹{summary['income']:,.2f}"
+            )
+
+            value_labels["Expense"].config(
+                text=f"₹{summary['expense']:,.2f}"
+            )
+
+            value_labels["Balance"].config(
+                text=f"₹{summary['balance']:,.2f}"
+            )
+
+            value_labels["Budget"].config(
+                text=f"₹{budget:,.2f}"
+            )
+
+            for item in tree.get_children():
+                tree.delete(item)
+
+            for row in self.db.categories(
+                month
+            ):
+
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row["category"],
+                        f"₹{row['total']:,.2f}"
+                    )
+                )
+
+        combo.bind(
+            "<<ComboboxSelected>>",
+            lambda e: load()
+        )
+
+        bottom = tk.Frame(
+            win,
+            bg=self.colors["bg"]
+        )
+
+        bottom.pack(
+            fill="x",
+            padx=30,
+            pady=(5, 20)
+        )
+
+        def export():
+
+            month = month_var.get()
+
+            rows = self.db.get_transactions(
+                month=month
+            )
+
+            if not rows:
+
+                messagebox.showwarning(
+                    "No Data",
+                    "There is no data for this month.",
+                    parent=win
+                )
+
+                return
+
+            path = filedialog.asksaveasfilename(
+                parent=win,
+                defaultextension=".csv",
+                initialfile=(
+                    f"Finova_Report_{month}.csv"
+                ),
+                filetypes=[
+                    ("CSV Files", "*.csv")
+                ]
+            )
+
+            if not path:
+                return
+
+            try:
+
+                with open(
+                    path,
+                    "w",
+                    newline="",
+                    encoding="utf-8-sig"
+                ) as file:
+
+                    writer = csv.writer(
+                        file
+                    )
+
+                    writer.writerow([
+                        "ID",
+                        "Date",
+                        "Type",
+                        "Category",
+                        "Amount",
+                        "Note"
+                    ])
+
+                    for row in rows:
+
+                        writer.writerow([
+                            row["id"],
+                            row["date"],
+                            row["type"],
+                            row["category"],
+                            row["amount"],
+                            row["note"]
+                        ])
+
+                messagebox.showinfo(
+                    "Export Complete",
+                    "CSV report exported successfully.",
+                    parent=win
+                )
+
+            except Exception as e:
+
+                messagebox.showerror(
+                    "Export Error",
+                    str(e),
+                    parent=win
+                )
+
+        tk.Button(
+            bottom,
+            text="Export CSV",
+            command=export,
+            bg=self.colors["green"],
+            fg="white",
+            relief="flat",
+            cursor="hand2",
+            font=("Segoe UI Semibold", 9),
+            padx=28,
+            pady=10
+        ).pack(
+            side="right"
+        )
+
+        load()
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    app = Finova()
+
+    app.mainloop()
