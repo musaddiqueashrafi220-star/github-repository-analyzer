@@ -1,0 +1,2674 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import sqlite3
+import csv
+import os
+from datetime import datetime, date, timedelta
+
+# ============================================================
+# APP CONFIG
+# ============================================================
+
+APP_NAME = "MediBook"
+APP_TITLE = "MediBook — Appointment Management System"
+VERSION = "Day 03 / 100"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+DB_FILE = os.path.join(DATA_DIR, "medibook.db")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# Colors
+BG = "#F4F7FB"
+SIDEBAR = "#0F172A"
+SIDEBAR_HOVER = "#1E293B"
+PRIMARY = "#2563EB"
+PRIMARY_DARK = "#1D4ED8"
+SUCCESS = "#10B981"
+WARNING = "#F59E0B"
+DANGER = "#EF4444"
+PURPLE = "#8B5CF6"
+CYAN = "#06B6D4"
+TEXT = "#0F172A"
+MUTED = "#64748B"
+WHITE = "#FFFFFF"
+BORDER = "#E2E8F0"
+CARD = "#FFFFFF"
+LIGHT_BLUE = "#EFF6FF"
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+class Database:
+    def __init__(self):
+        self.conn = sqlite3.connect(DB_FILE)
+        self.cursor = self.conn.cursor()
+        self.create_tables()
+
+    def create_tables(self):
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS patients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                email TEXT,
+                gender TEXT,
+                age INTEGER,
+                address TEXT,
+                created_at TEXT
+            )
+        """)
+
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS doctors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                specialty TEXT NOT NULL,
+                phone TEXT,
+                email TEXT,
+                availability TEXT,
+                created_at TEXT
+            )
+        """)
+
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS appointments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER NOT NULL,
+                doctor_id INTEGER NOT NULL,
+                appointment_date TEXT NOT NULL,
+                appointment_time TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Scheduled',
+                reason TEXT,
+                notes TEXT,
+                created_at TEXT,
+                FOREIGN KEY(patient_id) REFERENCES patients(id),
+                FOREIGN KEY(doctor_id) REFERENCES doctors(id)
+            )
+        """)
+
+        self.conn.commit()
+
+    # ---------------- Patients ----------------
+
+    def add_patient(self, name, phone, email, gender, age, address):
+        self.cursor.execute("""
+            INSERT INTO patients
+            (name, phone, email, gender, age, address, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            name,
+            phone,
+            email,
+            gender,
+            age,
+            address,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        self.conn.commit()
+
+    def get_patients(self, search=""):
+        if search:
+            query = """
+                SELECT * FROM patients
+                WHERE name LIKE ?
+                OR phone LIKE ?
+                OR email LIKE ?
+                ORDER BY id DESC
+            """
+            val = f"%{search}%"
+            return self.cursor.execute(query, (val, val, val)).fetchall()
+
+        return self.cursor.execute(
+            "SELECT * FROM patients ORDER BY id DESC"
+        ).fetchall()
+
+    def get_patient_by_id(self, patient_id):
+        return self.cursor.execute(
+            "SELECT * FROM patients WHERE id=?",
+            (patient_id,)
+        ).fetchone()
+
+    def update_patient(self, patient_id, name, phone, email, gender, age, address):
+        self.cursor.execute("""
+            UPDATE patients
+            SET name=?, phone=?, email=?, gender=?, age=?, address=?
+            WHERE id=?
+        """, (
+            name,
+            phone,
+            email,
+            gender,
+            age,
+            address,
+            patient_id
+        ))
+        self.conn.commit()
+
+    def delete_patient(self, patient_id):
+        self.cursor.execute(
+            "DELETE FROM appointments WHERE patient_id=?",
+            (patient_id,)
+        )
+        self.cursor.execute(
+            "DELETE FROM patients WHERE id=?",
+            (patient_id,)
+        )
+        self.conn.commit()
+
+    # ---------------- Doctors ----------------
+
+    def add_doctor(self, name, specialty, phone, email, availability):
+        self.cursor.execute("""
+            INSERT INTO doctors
+            (name, specialty, phone, email, availability, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            name,
+            specialty,
+            phone,
+            email,
+            availability,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        self.conn.commit()
+
+    def get_doctors(self, search=""):
+        if search:
+            val = f"%{search}%"
+            return self.cursor.execute("""
+                SELECT * FROM doctors
+                WHERE name LIKE ?
+                OR specialty LIKE ?
+                OR phone LIKE ?
+                ORDER BY id DESC
+            """, (val, val, val)).fetchall()
+
+        return self.cursor.execute(
+            "SELECT * FROM doctors ORDER BY id DESC"
+        ).fetchall()
+
+    def get_doctor_by_id(self, doctor_id):
+        return self.cursor.execute(
+            "SELECT * FROM doctors WHERE id=?",
+            (doctor_id,)
+        ).fetchone()
+
+    def update_doctor(self, doctor_id, name, specialty, phone, email, availability):
+        self.cursor.execute("""
+            UPDATE doctors
+            SET name=?, specialty=?, phone=?, email=?, availability=?
+            WHERE id=?
+        """, (
+            name,
+            specialty,
+            phone,
+            email,
+            availability,
+            doctor_id
+        ))
+        self.conn.commit()
+
+    def delete_doctor(self, doctor_id):
+        self.cursor.execute(
+            "DELETE FROM appointments WHERE doctor_id=?",
+            (doctor_id,)
+        )
+        self.cursor.execute(
+            "DELETE FROM doctors WHERE id=?",
+            (doctor_id,)
+        )
+        self.conn.commit()
+
+    # ---------------- Appointments ----------------
+
+    def add_appointment(
+        self,
+        patient_id,
+        doctor_id,
+        appointment_date,
+        appointment_time,
+        status,
+        reason,
+        notes
+    ):
+        self.cursor.execute("""
+            INSERT INTO appointments
+            (
+                patient_id,
+                doctor_id,
+                appointment_date,
+                appointment_time,
+                status,
+                reason,
+                notes,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            patient_id,
+            doctor_id,
+            appointment_date,
+            appointment_time,
+            status,
+            reason,
+            notes,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        self.conn.commit()
+
+    def get_appointments(self, search="", status="All"):
+        query = """
+            SELECT
+                a.id,
+                p.name,
+                d.name,
+                d.specialty,
+                a.appointment_date,
+                a.appointment_time,
+                a.status,
+                a.reason,
+                a.notes,
+                a.patient_id,
+                a.doctor_id
+            FROM appointments a
+            JOIN patients p ON a.patient_id = p.id
+            JOIN doctors d ON a.doctor_id = d.id
+            WHERE 1=1
+        """
+
+        params = []
+
+        if search:
+            query += """
+                AND (
+                    p.name LIKE ?
+                    OR d.name LIKE ?
+                    OR d.specialty LIKE ?
+                    OR a.reason LIKE ?
+                )
+            """
+            val = f"%{search}%"
+            params.extend([val, val, val, val])
+
+        if status != "All":
+            query += " AND a.status=?"
+            params.append(status)
+
+        query += """
+            ORDER BY
+                a.appointment_date ASC,
+                a.appointment_time ASC
+        """
+
+        return self.cursor.execute(query, params).fetchall()
+
+    def get_appointment_by_id(self, appointment_id):
+        return self.cursor.execute("""
+            SELECT *
+            FROM appointments
+            WHERE id=?
+        """, (appointment_id,)).fetchone()
+
+    def update_appointment(
+        self,
+        appointment_id,
+        patient_id,
+        doctor_id,
+        appointment_date,
+        appointment_time,
+        status,
+        reason,
+        notes
+    ):
+        self.cursor.execute("""
+            UPDATE appointments
+            SET patient_id=?,
+                doctor_id=?,
+                appointment_date=?,
+                appointment_time=?,
+                status=?,
+                reason=?,
+                notes=?
+            WHERE id=?
+        """, (
+            patient_id,
+            doctor_id,
+            appointment_date,
+            appointment_time,
+            status,
+            reason,
+            notes,
+            appointment_id
+        ))
+        self.conn.commit()
+
+    def delete_appointment(self, appointment_id):
+        self.cursor.execute(
+            "DELETE FROM appointments WHERE id=?",
+            (appointment_id,)
+        )
+        self.conn.commit()
+
+    # ---------------- Dashboard ----------------
+
+    def get_dashboard_stats(self):
+        today = date.today().strftime("%Y-%m-%d")
+
+        total_patients = self.cursor.execute(
+            "SELECT COUNT(*) FROM patients"
+        ).fetchone()[0]
+
+        total_doctors = self.cursor.execute(
+            "SELECT COUNT(*) FROM doctors"
+        ).fetchone()[0]
+
+        today_appointments = self.cursor.execute(
+            "SELECT COUNT(*) FROM appointments WHERE appointment_date=?",
+            (today,)
+        ).fetchone()[0]
+
+        completed = self.cursor.execute("""
+            SELECT COUNT(*)
+            FROM appointments
+            WHERE status='Completed'
+        """).fetchone()[0]
+
+        return {
+            "patients": total_patients,
+            "doctors": total_doctors,
+            "today": today_appointments,
+            "completed": completed
+        }
+
+    def get_today_appointments(self):
+        today = date.today().strftime("%Y-%m-%d")
+
+        return self.cursor.execute("""
+            SELECT
+                a.id,
+                p.name,
+                d.name,
+                d.specialty,
+                a.appointment_time,
+                a.status
+            FROM appointments a
+            JOIN patients p ON a.patient_id=p.id
+            JOIN doctors d ON a.doctor_id=d.id
+            WHERE a.appointment_date=?
+            ORDER BY a.appointment_time ASC
+        """, (today,)).fetchall()
+
+    def get_status_counts(self):
+        statuses = ["Scheduled", "Completed", "Cancelled"]
+
+        data = {}
+
+        for status in statuses:
+            count = self.cursor.execute("""
+                SELECT COUNT(*)
+                FROM appointments
+                WHERE status=?
+            """, (status,)).fetchone()[0]
+
+            data[status] = count
+
+        return data
+
+    def close(self):
+        self.conn.close()
+
+
+# ============================================================
+# MAIN APP
+# ============================================================
+
+class MediBookApp(tk.Tk):
+
+    def __init__(self):
+        super().__init__()
+
+        self.db = Database()
+
+        self.title(APP_TITLE)
+        self.geometry("1400x850")
+        self.minsize(1180, 720)
+        self.configure(bg=BG)
+
+        self.selected_patient_id = None
+        self.selected_doctor_id = None
+        self.selected_appointment_id = None
+
+        self.nav_buttons = {}
+
+        self.setup_styles()
+        self.build_layout()
+
+        self.show_dashboard()
+
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # ========================================================
+    # STYLING
+    # ========================================================
+
+    def setup_styles(self):
+        style = ttk.Style(self)
+
+        try:
+            style.theme_use("clam")
+        except:
+            pass
+
+        style.configure(
+            "Treeview",
+            background=WHITE,
+            fieldbackground=WHITE,
+            foreground=TEXT,
+            rowheight=34,
+            font=("Segoe UI", 10),
+            borderwidth=0
+        )
+
+        style.configure(
+            "Treeview.Heading",
+            background="#EEF2F7",
+            foreground=TEXT,
+            font=("Segoe UI", 10, "bold"),
+            relief="flat"
+        )
+
+        style.map(
+            "Treeview",
+            background=[("selected", "#DBEAFE")],
+            foreground=[("selected", TEXT)]
+        )
+
+        style.configure(
+            "TCombobox",
+            padding=7
+        )
+
+    # ========================================================
+    # MAIN LAYOUT
+    # ========================================================
+
+    def build_layout(self):
+        self.sidebar = tk.Frame(
+            self,
+            bg=SIDEBAR,
+            width=245
+        )
+        self.sidebar.pack(
+            side="left",
+            fill="y"
+        )
+        self.sidebar.pack_propagate(False)
+
+        self.main = tk.Frame(
+            self,
+            bg=BG
+        )
+        self.main.pack(
+            side="right",
+            fill="both",
+            expand=True
+        )
+
+        self.build_sidebar()
+
+    def build_sidebar(self):
+        logo_box = tk.Frame(
+            self.sidebar,
+            bg=SIDEBAR
+        )
+        logo_box.pack(
+            fill="x",
+            padx=20,
+            pady=(28, 30)
+        )
+
+        tk.Label(
+            logo_box,
+            text="✚",
+            bg=PRIMARY,
+            fg=WHITE,
+            font=("Segoe UI", 20, "bold"),
+            width=2,
+            height=1
+        ).pack(side="left")
+
+        logo_text = tk.Frame(
+            logo_box,
+            bg=SIDEBAR
+        )
+        logo_text.pack(
+            side="left",
+            padx=12
+        )
+
+        tk.Label(
+            logo_text,
+            text=APP_NAME,
+            bg=SIDEBAR,
+            fg=WHITE,
+            font=("Segoe UI", 18, "bold")
+        ).pack(anchor="w")
+
+        tk.Label(
+            logo_text,
+            text="Appointment Manager",
+            bg=SIDEBAR,
+            fg="#94A3B8",
+            font=("Segoe UI", 9)
+        ).pack(anchor="w")
+
+        menu_items = [
+            ("Dashboard", "⌂", self.show_dashboard),
+            ("Appointments", "◷", self.show_appointments),
+            ("Patients", "♙", self.show_patients),
+            ("Doctors", "✚", self.show_doctors),
+            ("Reports", "▥", self.show_reports),
+        ]
+
+        for text, icon, command in menu_items:
+            btn = tk.Button(
+                self.sidebar,
+                text=f"  {icon}   {text}",
+                anchor="w",
+                bg=SIDEBAR,
+                fg="#CBD5E1",
+                activebackground=SIDEBAR_HOVER,
+                activeforeground=WHITE,
+                bd=0,
+                relief="flat",
+                font=("Segoe UI", 11, "bold"),
+                padx=18,
+                pady=13,
+                command=lambda t=text, c=command: self.nav_click(t, c)
+            )
+
+            btn.pack(
+                fill="x",
+                padx=14,
+                pady=3
+            )
+
+            self.nav_buttons[text] = btn
+
+        bottom = tk.Frame(
+            self.sidebar,
+            bg=SIDEBAR
+        )
+        bottom.pack(
+            side="bottom",
+            fill="x",
+            padx=20,
+            pady=22
+        )
+
+        tk.Label(
+            bottom,
+            text=VERSION,
+            bg=SIDEBAR,
+            fg="#64748B",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor="w")
+
+        tk.Label(
+            bottom,
+            text="100 Days Coding Challenge",
+            bg=SIDEBAR,
+            fg="#94A3B8",
+            font=("Segoe UI", 9)
+        ).pack(anchor="w", pady=(3, 0))
+
+    def nav_click(self, name, command):
+        for key, btn in self.nav_buttons.items():
+            if key == name:
+                btn.configure(
+                    bg=PRIMARY,
+                    fg=WHITE
+                )
+            else:
+                btn.configure(
+                    bg=SIDEBAR,
+                    fg="#CBD5E1"
+                )
+
+        command()
+
+    def clear_main(self):
+        for widget in self.main.winfo_children():
+            widget.destroy()
+
+    # ========================================================
+    # COMMON UI
+    # ========================================================
+
+    def page_header(self, title, subtitle, button_text=None, command=None):
+        header = tk.Frame(
+            self.main,
+            bg=BG
+        )
+        header.pack(
+            fill="x",
+            padx=30,
+            pady=(26, 18)
+        )
+
+        left = tk.Frame(
+            header,
+            bg=BG
+        )
+        left.pack(side="left")
+
+        tk.Label(
+            left,
+            text=title,
+            bg=BG,
+            fg=TEXT,
+            font=("Segoe UI", 24, "bold")
+        ).pack(anchor="w")
+
+        tk.Label(
+            left,
+            text=subtitle,
+            bg=BG,
+            fg=MUTED,
+            font=("Segoe UI", 10)
+        ).pack(anchor="w", pady=(5, 0))
+
+        if button_text and command:
+            tk.Button(
+                header,
+                text=button_text,
+                bg=PRIMARY,
+                fg=WHITE,
+                activebackground=PRIMARY_DARK,
+                activeforeground=WHITE,
+                bd=0,
+                relief="flat",
+                font=("Segoe UI", 10, "bold"),
+                padx=18,
+                pady=11,
+                cursor="hand2",
+                command=command
+            ).pack(side="right")
+
+    def card(self, parent):
+        return tk.Frame(
+            parent,
+            bg=CARD,
+            highlightbackground=BORDER,
+            highlightthickness=1
+        )
+
+    def input_label(self, parent, text):
+        tk.Label(
+            parent,
+            text=text,
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor="w", pady=(8, 4))
+
+    # ========================================================
+    # DASHBOARD
+    # ========================================================
+
+    def show_dashboard(self):
+        self.clear_main()
+
+        self.page_header(
+            "Dashboard",
+            "Overview of your appointment management system"
+        )
+
+        stats = self.db.get_dashboard_stats()
+
+        cards_frame = tk.Frame(
+            self.main,
+            bg=BG
+        )
+        cards_frame.pack(
+            fill="x",
+            padx=30,
+            pady=(0, 20)
+        )
+
+        cards = [
+            ("Total Patients", stats["patients"], PRIMARY, "♙"),
+            ("Total Doctors", stats["doctors"], PURPLE, "✚"),
+            ("Today's Appointments", stats["today"], WARNING, "◷"),
+            ("Completed", stats["completed"], SUCCESS, "✓")
+        ]
+
+        for i, item in enumerate(cards):
+            cards_frame.grid_columnconfigure(i, weight=1)
+
+            title, value, color, icon = item
+
+            card = tk.Frame(
+                cards_frame,
+                bg=WHITE,
+                highlightbackground=BORDER,
+                highlightthickness=1
+            )
+            card.grid(
+                row=0,
+                column=i,
+                sticky="nsew",
+                padx=6
+            )
+
+            top = tk.Frame(
+                card,
+                bg=WHITE
+            )
+            top.pack(
+                fill="x",
+                padx=18,
+                pady=(17, 8)
+            )
+
+            tk.Label(
+                top,
+                text=icon,
+                bg=color,
+                fg=WHITE,
+                font=("Segoe UI", 15, "bold"),
+                width=3,
+                height=1
+            ).pack(side="left")
+
+            tk.Label(
+                top,
+                text=title,
+                bg=WHITE,
+                fg=MUTED,
+                font=("Segoe UI", 10, "bold")
+            ).pack(
+                side="left",
+                padx=10
+            )
+
+            value_label = tk.Label(
+                card,
+                text="0",
+                bg=WHITE,
+                fg=TEXT,
+                font=("Segoe UI", 25, "bold")
+            )
+            value_label.pack(
+                anchor="w",
+                padx=18,
+                pady=(0, 16)
+            )
+
+            self.animate_number(value_label, value)
+
+        content = tk.Frame(
+            self.main,
+            bg=BG
+        )
+        content.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=(0, 28)
+        )
+
+        content.grid_columnconfigure(0, weight=2)
+        content.grid_columnconfigure(1, weight=1)
+        content.grid_rowconfigure(0, weight=1)
+
+        # Today's appointment card
+        today_card = self.card(content)
+        today_card.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=(0, 9)
+        )
+
+        tk.Label(
+            today_card,
+            text="Today's Appointments",
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 14, "bold")
+        ).pack(
+            anchor="w",
+            padx=20,
+            pady=(18, 4)
+        )
+
+        tk.Label(
+            today_card,
+            text=date.today().strftime("%A, %d %B %Y"),
+            bg=WHITE,
+            fg=MUTED,
+            font=("Segoe UI", 9)
+        ).pack(
+            anchor="w",
+            padx=20,
+            pady=(0, 12)
+        )
+
+        columns = (
+            "Patient",
+            "Doctor",
+            "Specialty",
+            "Time",
+            "Status"
+        )
+
+        tree = ttk.Treeview(
+            today_card,
+            columns=columns,
+            show="headings"
+        )
+
+        for col in columns:
+            tree.heading(col, text=col)
+            tree.column(col, anchor="center")
+
+        tree.column("Patient", width=170)
+        tree.column("Doctor", width=160)
+        tree.column("Specialty", width=130)
+        tree.column("Time", width=90)
+        tree.column("Status", width=110)
+
+        tree.pack(
+            fill="both",
+            expand=True,
+            padx=18,
+            pady=(0, 18)
+        )
+
+        today_rows = self.db.get_today_appointments()
+
+        if today_rows:
+            for row in today_rows:
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5]
+                    )
+                )
+
+        # status chart
+        status_card = self.card(content)
+        status_card.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
+            padx=(9, 0)
+        )
+
+        tk.Label(
+            status_card,
+            text="Appointment Status",
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 14, "bold")
+        ).pack(
+            anchor="w",
+            padx=20,
+            pady=(18, 20)
+        )
+
+        status_data = self.db.get_status_counts()
+
+        status_colors = {
+            "Scheduled": PRIMARY,
+            "Completed": SUCCESS,
+            "Cancelled": DANGER
+        }
+
+        max_count = max(
+            status_data.values()
+        ) if status_data else 1
+
+        if max_count == 0:
+            max_count = 1
+
+        for status, count in status_data.items():
+            block = tk.Frame(
+                status_card,
+                bg=WHITE
+            )
+            block.pack(
+                fill="x",
+                padx=20,
+                pady=12
+            )
+
+            top = tk.Frame(
+                block,
+                bg=WHITE
+            )
+            top.pack(fill="x")
+
+            tk.Label(
+                top,
+                text=status,
+                bg=WHITE,
+                fg=TEXT,
+                font=("Segoe UI", 10, "bold")
+            ).pack(side="left")
+
+            tk.Label(
+                top,
+                text=str(count),
+                bg=WHITE,
+                fg=MUTED,
+                font=("Segoe UI", 10, "bold")
+            ).pack(side="right")
+
+            bar_bg = tk.Frame(
+                block,
+                bg="#E5E7EB",
+                height=10
+            )
+            bar_bg.pack(
+                fill="x",
+                pady=(8, 0)
+            )
+            bar_bg.pack_propagate(False)
+
+            bar = tk.Frame(
+                bar_bg,
+                bg=status_colors[status],
+                width=0
+            )
+            bar.pack(
+                side="left",
+                fill="y"
+            )
+
+            ratio = count / max_count
+            target = ratio
+
+            self.after(
+                150,
+                lambda b=bar, bgf=bar_bg, r=target:
+                self.animate_bar(b, bgf, r)
+            )
+
+    def animate_number(self, label, target, current=0):
+        if target <= 0:
+            label.configure(text="0")
+            return
+
+        step = max(1, target // 20)
+        current += step
+
+        if current >= target:
+            label.configure(text=str(target))
+            return
+
+        label.configure(text=str(current))
+        self.after(
+            25,
+            lambda: self.animate_number(
+                label,
+                target,
+                current
+            )
+        )
+
+    def animate_bar(self, bar, container, ratio, step=0):
+        if step > 20:
+            return
+
+        self.update_idletasks()
+
+        total_width = container.winfo_width()
+
+        width = int(
+            total_width * ratio * (step / 20)
+        )
+
+        bar.configure(width=width)
+
+        self.after(
+            15,
+            lambda: self.animate_bar(
+                bar,
+                container,
+                ratio,
+                step + 1
+            )
+        )
+
+    # ========================================================
+    # APPOINTMENTS PAGE
+    # ========================================================
+
+    def show_appointments(self):
+        self.clear_main()
+
+        self.page_header(
+            "Appointments",
+            "Schedule and manage all appointments",
+            "+ New Appointment",
+            self.open_appointment_form
+        )
+
+        filter_card = self.card(self.main)
+        filter_card.pack(
+            fill="x",
+            padx=30,
+            pady=(0, 14)
+        )
+
+        filter_inner = tk.Frame(
+            filter_card,
+            bg=WHITE
+        )
+        filter_inner.pack(
+            fill="x",
+            padx=18,
+            pady=14
+        )
+
+        self.appointment_search_var = tk.StringVar()
+
+        search_entry = tk.Entry(
+            filter_inner,
+            textvariable=self.appointment_search_var,
+            bg="#F8FAFC",
+            fg=TEXT,
+            relief="flat",
+            font=("Segoe UI", 10)
+        )
+        search_entry.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            ipady=9,
+            padx=(0, 10)
+        )
+
+        self.appointment_status_var = tk.StringVar(
+            value="All"
+        )
+
+        status_combo = ttk.Combobox(
+            filter_inner,
+            textvariable=self.appointment_status_var,
+            values=[
+                "All",
+                "Scheduled",
+                "Completed",
+                "Cancelled"
+            ],
+            state="readonly",
+            width=16
+        )
+        status_combo.pack(
+            side="left",
+            padx=(0, 10)
+        )
+
+        tk.Button(
+            filter_inner,
+            text="Search",
+            bg=PRIMARY,
+            fg=WHITE,
+            bd=0,
+            relief="flat",
+            padx=18,
+            pady=9,
+            font=("Segoe UI", 9, "bold"),
+            command=self.load_appointments
+        ).pack(side="left")
+
+        table_card = self.card(self.main)
+        table_card.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=(0, 28)
+        )
+
+        table_top = tk.Frame(
+            table_card,
+            bg=WHITE
+        )
+        table_top.pack(
+            fill="x",
+            padx=18,
+            pady=(16, 10)
+        )
+
+        tk.Label(
+            table_top,
+            text="Appointment Records",
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 13, "bold")
+        ).pack(side="left")
+
+        tk.Button(
+            table_top,
+            text="Delete",
+            bg="#FEE2E2",
+            fg=DANGER,
+            bd=0,
+            relief="flat",
+            padx=14,
+            pady=7,
+            font=("Segoe UI", 9, "bold"),
+            command=self.delete_selected_appointment
+        ).pack(
+            side="right",
+            padx=(8, 0)
+        )
+
+        tk.Button(
+            table_top,
+            text="Edit",
+            bg=LIGHT_BLUE,
+            fg=PRIMARY,
+            bd=0,
+            relief="flat",
+            padx=14,
+            pady=7,
+            font=("Segoe UI", 9, "bold"),
+            command=self.edit_selected_appointment
+        ).pack(side="right")
+
+        cols = (
+            "ID",
+            "Patient",
+            "Doctor",
+            "Specialty",
+            "Date",
+            "Time",
+            "Status",
+            "Reason"
+        )
+
+        self.appointment_tree = ttk.Treeview(
+            table_card,
+            columns=cols,
+            show="headings"
+        )
+
+        widths = {
+            "ID": 55,
+            "Patient": 150,
+            "Doctor": 150,
+            "Specialty": 130,
+            "Date": 110,
+            "Time": 90,
+            "Status": 105,
+            "Reason": 220
+        }
+
+        for col in cols:
+            self.appointment_tree.heading(
+                col,
+                text=col
+            )
+            self.appointment_tree.column(
+                col,
+                width=widths[col],
+                anchor="center"
+            )
+
+        scrollbar = ttk.Scrollbar(
+            table_card,
+            orient="vertical",
+            command=self.appointment_tree.yview
+        )
+
+        self.appointment_tree.configure(
+            yscrollcommand=scrollbar.set
+        )
+
+        scrollbar.pack(
+            side="right",
+            fill="y",
+            pady=(0, 18)
+        )
+
+        self.appointment_tree.pack(
+            fill="both",
+            expand=True,
+            padx=18,
+            pady=(0, 18)
+        )
+
+        self.load_appointments()
+
+    def load_appointments(self):
+        for item in self.appointment_tree.get_children():
+            self.appointment_tree.delete(item)
+
+        search = self.appointment_search_var.get().strip()
+        status = self.appointment_status_var.get()
+
+        rows = self.db.get_appointments(
+            search,
+            status
+        )
+
+        for row in rows:
+            self.appointment_tree.insert(
+                "",
+                "end",
+                values=(
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7]
+                )
+            )
+
+    def open_appointment_form(self, appointment_id=None):
+        patients = self.db.get_patients()
+        doctors = self.db.get_doctors()
+
+        if not patients:
+            messagebox.showwarning(
+                "Patients Required",
+                "Please add at least one patient first."
+            )
+            return
+
+        if not doctors:
+            messagebox.showwarning(
+                "Doctors Required",
+                "Please add at least one doctor first."
+            )
+            return
+
+        win = tk.Toplevel(self)
+        win.title(
+            "Edit Appointment"
+            if appointment_id
+            else "New Appointment"
+        )
+        win.geometry("550x690")
+        win.resizable(False, False)
+        win.configure(bg=WHITE)
+        win.transient(self)
+        win.grab_set()
+
+        title = (
+            "Edit Appointment"
+            if appointment_id
+            else "Schedule New Appointment"
+        )
+
+        tk.Label(
+            win,
+            text=title,
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 20, "bold")
+        ).pack(
+            anchor="w",
+            padx=28,
+            pady=(25, 5)
+        )
+
+        tk.Label(
+            win,
+            text="Enter appointment details below.",
+            bg=WHITE,
+            fg=MUTED,
+            font=("Segoe UI", 9)
+        ).pack(
+            anchor="w",
+            padx=28,
+            pady=(0, 15)
+        )
+
+        form = tk.Frame(
+            win,
+            bg=WHITE
+        )
+        form.pack(
+            fill="both",
+            expand=True,
+            padx=28
+        )
+
+        patient_map = {
+            f"{p[0]} - {p[1]}": p[0]
+            for p in patients
+        }
+
+        doctor_map = {
+            f"{d[0]} - {d[1]} ({d[2]})": d[0]
+            for d in doctors
+        }
+
+        self.input_label(form, "Patient")
+        patient_var = tk.StringVar()
+
+        patient_combo = ttk.Combobox(
+            form,
+            textvariable=patient_var,
+            values=list(patient_map.keys()),
+            state="readonly"
+        )
+        patient_combo.pack(
+            fill="x",
+            ipady=4
+        )
+
+        self.input_label(form, "Doctor")
+        doctor_var = tk.StringVar()
+
+        doctor_combo = ttk.Combobox(
+            form,
+            textvariable=doctor_var,
+            values=list(doctor_map.keys()),
+            state="readonly"
+        )
+        doctor_combo.pack(
+            fill="x",
+            ipady=4
+        )
+
+        self.input_label(
+            form,
+            "Appointment Date (YYYY-MM-DD)"
+        )
+
+        date_var = tk.StringVar(
+            value=date.today().strftime("%Y-%m-%d")
+        )
+
+        date_entry = tk.Entry(
+            form,
+            textvariable=date_var,
+            bg="#F8FAFC",
+            relief="flat",
+            font=("Segoe UI", 10)
+        )
+        date_entry.pack(
+            fill="x",
+            ipady=9
+        )
+
+        self.input_label(
+            form,
+            "Appointment Time (HH:MM)"
+        )
+
+        time_var = tk.StringVar(
+            value="10:00"
+        )
+
+        time_entry = tk.Entry(
+            form,
+            textvariable=time_var,
+            bg="#F8FAFC",
+            relief="flat",
+            font=("Segoe UI", 10)
+        )
+        time_entry.pack(
+            fill="x",
+            ipady=9
+        )
+
+        self.input_label(form, "Status")
+
+        status_var = tk.StringVar(
+            value="Scheduled"
+        )
+
+        status_combo = ttk.Combobox(
+            form,
+            textvariable=status_var,
+            values=[
+                "Scheduled",
+                "Completed",
+                "Cancelled"
+            ],
+            state="readonly"
+        )
+        status_combo.pack(
+            fill="x",
+            ipady=4
+        )
+
+        self.input_label(form, "Reason")
+
+        reason_var = tk.StringVar()
+
+        reason_entry = tk.Entry(
+            form,
+            textvariable=reason_var,
+            bg="#F8FAFC",
+            relief="flat",
+            font=("Segoe UI", 10)
+        )
+        reason_entry.pack(
+            fill="x",
+            ipady=9
+        )
+
+        self.input_label(form, "Notes")
+
+        notes_text = tk.Text(
+            form,
+            height=5,
+            bg="#F8FAFC",
+            fg=TEXT,
+            relief="flat",
+            font=("Segoe UI", 10)
+        )
+        notes_text.pack(
+            fill="x"
+        )
+
+        if appointment_id:
+            data = self.db.get_appointment_by_id(
+                appointment_id
+            )
+
+            if data:
+                patient_id = data[1]
+                doctor_id = data[2]
+
+                for label, pid in patient_map.items():
+                    if pid == patient_id:
+                        patient_var.set(label)
+                        break
+
+                for label, did in doctor_map.items():
+                    if did == doctor_id:
+                        doctor_var.set(label)
+                        break
+
+                date_var.set(data[3])
+                time_var.set(data[4])
+                status_var.set(data[5])
+                reason_var.set(data[6] or "")
+
+                notes_text.insert(
+                    "1.0",
+                    data[7] or ""
+                )
+
+        def save():
+            patient_label = patient_var.get()
+            doctor_label = doctor_var.get()
+
+            if not patient_label or not doctor_label:
+                messagebox.showwarning(
+                    "Missing Data",
+                    "Please select patient and doctor."
+                )
+                return
+
+            appointment_date = date_var.get().strip()
+            appointment_time = time_var.get().strip()
+
+            try:
+                datetime.strptime(
+                    appointment_date,
+                    "%Y-%m-%d"
+                )
+
+                datetime.strptime(
+                    appointment_time,
+                    "%H:%M"
+                )
+
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Date/Time",
+                    "Use date YYYY-MM-DD and time HH:MM."
+                )
+                return
+
+            patient_id = patient_map[patient_label]
+            doctor_id = doctor_map[doctor_label]
+
+            reason = reason_var.get().strip()
+            notes = notes_text.get(
+                "1.0",
+                "end"
+            ).strip()
+
+            if appointment_id:
+                self.db.update_appointment(
+                    appointment_id,
+                    patient_id,
+                    doctor_id,
+                    appointment_date,
+                    appointment_time,
+                    status_var.get(),
+                    reason,
+                    notes
+                )
+            else:
+                self.db.add_appointment(
+                    patient_id,
+                    doctor_id,
+                    appointment_date,
+                    appointment_time,
+                    status_var.get(),
+                    reason,
+                    notes
+                )
+
+            win.destroy()
+            self.show_appointments()
+
+        tk.Button(
+            win,
+            text=(
+                "Update Appointment"
+                if appointment_id
+                else "Schedule Appointment"
+            ),
+            bg=PRIMARY,
+            fg=WHITE,
+            activebackground=PRIMARY_DARK,
+            activeforeground=WHITE,
+            bd=0,
+            relief="flat",
+            font=("Segoe UI", 10, "bold"),
+            pady=12,
+            command=save
+        ).pack(
+            fill="x",
+            padx=28,
+            pady=24
+        )
+
+    def edit_selected_appointment(self):
+        selected = self.appointment_tree.selection()
+
+        if not selected:
+            messagebox.showwarning(
+                "Select Appointment",
+                "Please select an appointment first."
+            )
+            return
+
+        values = self.appointment_tree.item(
+            selected[0],
+            "values"
+        )
+
+        appointment_id = int(values[0])
+
+        self.open_appointment_form(
+            appointment_id
+        )
+
+    def delete_selected_appointment(self):
+        selected = self.appointment_tree.selection()
+
+        if not selected:
+            messagebox.showwarning(
+                "Select Appointment",
+                "Please select an appointment first."
+            )
+            return
+
+        values = self.appointment_tree.item(
+            selected[0],
+            "values"
+        )
+
+        appointment_id = int(values[0])
+
+        confirm = messagebox.askyesno(
+            "Delete Appointment",
+            "Are you sure you want to delete this appointment?"
+        )
+
+        if confirm:
+            self.db.delete_appointment(
+                appointment_id
+            )
+            self.load_appointments()
+
+    # ========================================================
+    # PATIENTS PAGE
+    # ========================================================
+
+    def show_patients(self):
+        self.clear_main()
+
+        self.page_header(
+            "Patients",
+            "Manage patient information and records",
+            "+ Add Patient",
+            self.open_patient_form
+        )
+
+        search_card = self.card(self.main)
+        search_card.pack(
+            fill="x",
+            padx=30,
+            pady=(0, 14)
+        )
+
+        inner = tk.Frame(
+            search_card,
+            bg=WHITE
+        )
+        inner.pack(
+            fill="x",
+            padx=18,
+            pady=14
+        )
+
+        self.patient_search_var = tk.StringVar()
+
+        tk.Entry(
+            inner,
+            textvariable=self.patient_search_var,
+            bg="#F8FAFC",
+            fg=TEXT,
+            relief="flat",
+            font=("Segoe UI", 10)
+        ).pack(
+            side="left",
+            fill="x",
+            expand=True,
+            ipady=9,
+            padx=(0, 10)
+        )
+
+        tk.Button(
+            inner,
+            text="Search",
+            bg=PRIMARY,
+            fg=WHITE,
+            bd=0,
+            padx=18,
+            pady=9,
+            font=("Segoe UI", 9, "bold"),
+            command=self.load_patients
+        ).pack(side="left")
+
+        table_card = self.card(self.main)
+        table_card.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=(0, 28)
+        )
+
+        top = tk.Frame(
+            table_card,
+            bg=WHITE
+        )
+        top.pack(
+            fill="x",
+            padx=18,
+            pady=(16, 10)
+        )
+
+        tk.Label(
+            top,
+            text="Patient Records",
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 13, "bold")
+        ).pack(side="left")
+
+        tk.Button(
+            top,
+            text="Delete",
+            bg="#FEE2E2",
+            fg=DANGER,
+            bd=0,
+            padx=14,
+            pady=7,
+            font=("Segoe UI", 9, "bold"),
+            command=self.delete_selected_patient
+        ).pack(
+            side="right",
+            padx=(8, 0)
+        )
+
+        tk.Button(
+            top,
+            text="Edit",
+            bg=LIGHT_BLUE,
+            fg=PRIMARY,
+            bd=0,
+            padx=14,
+            pady=7,
+            font=("Segoe UI", 9, "bold"),
+            command=self.edit_selected_patient
+        ).pack(side="right")
+
+        cols = (
+            "ID",
+            "Name",
+            "Phone",
+            "Email",
+            "Gender",
+            "Age",
+            "Address"
+        )
+
+        self.patient_tree = ttk.Treeview(
+            table_card,
+            columns=cols,
+            show="headings"
+        )
+
+        widths = {
+            "ID": 50,
+            "Name": 170,
+            "Phone": 130,
+            "Email": 200,
+            "Gender": 90,
+            "Age": 60,
+            "Address": 250
+        }
+
+        for col in cols:
+            self.patient_tree.heading(
+                col,
+                text=col
+            )
+            self.patient_tree.column(
+                col,
+                width=widths[col],
+                anchor="center"
+            )
+
+        self.patient_tree.pack(
+            fill="both",
+            expand=True,
+            padx=18,
+            pady=(0, 18)
+        )
+
+        self.load_patients()
+
+    def load_patients(self):
+        for item in self.patient_tree.get_children():
+            self.patient_tree.delete(item)
+
+        search = self.patient_search_var.get().strip()
+
+        rows = self.db.get_patients(search)
+
+        for row in rows:
+            self.patient_tree.insert(
+                "",
+                "end",
+                values=(
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6]
+                )
+            )
+
+    def open_patient_form(self, patient_id=None):
+        win = tk.Toplevel(self)
+
+        win.title(
+            "Edit Patient"
+            if patient_id
+            else "Add Patient"
+        )
+
+        win.geometry("500x660")
+        win.resizable(False, False)
+        win.configure(bg=WHITE)
+        win.transient(self)
+        win.grab_set()
+
+        tk.Label(
+            win,
+            text=(
+                "Edit Patient"
+                if patient_id
+                else "Add New Patient"
+            ),
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 20, "bold")
+        ).pack(
+            anchor="w",
+            padx=28,
+            pady=(25, 15)
+        )
+
+        form = tk.Frame(
+            win,
+            bg=WHITE
+        )
+        form.pack(
+            fill="both",
+            expand=True,
+            padx=28
+        )
+
+        name_var = tk.StringVar()
+        phone_var = tk.StringVar()
+        email_var = tk.StringVar()
+        gender_var = tk.StringVar(value="Male")
+        age_var = tk.StringVar()
+        address_var = tk.StringVar()
+
+        fields = [
+            ("Full Name", name_var),
+            ("Phone Number", phone_var),
+            ("Email Address", email_var),
+        ]
+
+        for label, variable in fields:
+            self.input_label(form, label)
+
+            tk.Entry(
+                form,
+                textvariable=variable,
+                bg="#F8FAFC",
+                relief="flat",
+                font=("Segoe UI", 10)
+            ).pack(
+                fill="x",
+                ipady=9
+            )
+
+        self.input_label(form, "Gender")
+
+        ttk.Combobox(
+            form,
+            textvariable=gender_var,
+            values=[
+                "Male",
+                "Female",
+                "Other"
+            ],
+            state="readonly"
+        ).pack(
+            fill="x",
+            ipady=4
+        )
+
+        self.input_label(form, "Age")
+
+        tk.Entry(
+            form,
+            textvariable=age_var,
+            bg="#F8FAFC",
+            relief="flat",
+            font=("Segoe UI", 10)
+        ).pack(
+            fill="x",
+            ipady=9
+        )
+
+        self.input_label(form, "Address")
+
+        tk.Entry(
+            form,
+            textvariable=address_var,
+            bg="#F8FAFC",
+            relief="flat",
+            font=("Segoe UI", 10)
+        ).pack(
+            fill="x",
+            ipady=9
+        )
+
+        if patient_id:
+            data = self.db.get_patient_by_id(
+                patient_id
+            )
+
+            if data:
+                name_var.set(data[1])
+                phone_var.set(data[2])
+                email_var.set(data[3] or "")
+                gender_var.set(data[4] or "Male")
+                age_var.set(data[5] or "")
+                address_var.set(data[6] or "")
+
+        def save():
+            name = name_var.get().strip()
+            phone = phone_var.get().strip()
+
+            if not name or not phone:
+                messagebox.showwarning(
+                    "Missing Data",
+                    "Name and phone are required."
+                )
+                return
+
+            age_text = age_var.get().strip()
+
+            if age_text:
+                if not age_text.isdigit():
+                    messagebox.showerror(
+                        "Invalid Age",
+                        "Age must be a number."
+                    )
+                    return
+
+                age_value = int(age_text)
+            else:
+                age_value = None
+
+            if patient_id:
+                self.db.update_patient(
+                    patient_id,
+                    name,
+                    phone,
+                    email_var.get().strip(),
+                    gender_var.get(),
+                    age_value,
+                    address_var.get().strip()
+                )
+            else:
+                self.db.add_patient(
+                    name,
+                    phone,
+                    email_var.get().strip(),
+                    gender_var.get(),
+                    age_value,
+                    address_var.get().strip()
+                )
+
+            win.destroy()
+            self.show_patients()
+
+        tk.Button(
+            win,
+            text=(
+                "Update Patient"
+                if patient_id
+                else "Add Patient"
+            ),
+            bg=PRIMARY,
+            fg=WHITE,
+            bd=0,
+            pady=12,
+            font=("Segoe UI", 10, "bold"),
+            command=save
+        ).pack(
+            fill="x",
+            padx=28,
+            pady=24
+        )
+
+    def edit_selected_patient(self):
+        selected = self.patient_tree.selection()
+
+        if not selected:
+            messagebox.showwarning(
+                "Select Patient",
+                "Please select a patient."
+            )
+            return
+
+        values = self.patient_tree.item(
+            selected[0],
+            "values"
+        )
+
+        self.open_patient_form(
+            int(values[0])
+        )
+
+    def delete_selected_patient(self):
+        selected = self.patient_tree.selection()
+
+        if not selected:
+            messagebox.showwarning(
+                "Select Patient",
+                "Please select a patient."
+            )
+            return
+
+        values = self.patient_tree.item(
+            selected[0],
+            "values"
+        )
+
+        if messagebox.askyesno(
+            "Delete Patient",
+            "Deleting this patient will also remove their appointments.\nContinue?"
+        ):
+            self.db.delete_patient(
+                int(values[0])
+            )
+            self.load_patients()
+
+    # ========================================================
+    # DOCTORS PAGE
+    # ========================================================
+
+    def show_doctors(self):
+        self.clear_main()
+
+        self.page_header(
+            "Doctors",
+            "Manage doctors and staff availability",
+            "+ Add Doctor",
+            self.open_doctor_form
+        )
+
+        search_card = self.card(self.main)
+        search_card.pack(
+            fill="x",
+            padx=30,
+            pady=(0, 14)
+        )
+
+        inner = tk.Frame(
+            search_card,
+            bg=WHITE
+        )
+        inner.pack(
+            fill="x",
+            padx=18,
+            pady=14
+        )
+
+        self.doctor_search_var = tk.StringVar()
+
+        tk.Entry(
+            inner,
+            textvariable=self.doctor_search_var,
+            bg="#F8FAFC",
+            relief="flat",
+            font=("Segoe UI", 10)
+        ).pack(
+            side="left",
+            fill="x",
+            expand=True,
+            ipady=9,
+            padx=(0, 10)
+        )
+
+        tk.Button(
+            inner,
+            text="Search",
+            bg=PRIMARY,
+            fg=WHITE,
+            bd=0,
+            padx=18,
+            pady=9,
+            font=("Segoe UI", 9, "bold"),
+            command=self.load_doctors
+        ).pack(side="left")
+
+        table_card = self.card(self.main)
+        table_card.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=(0, 28)
+        )
+
+        top = tk.Frame(
+            table_card,
+            bg=WHITE
+        )
+        top.pack(
+            fill="x",
+            padx=18,
+            pady=(16, 10)
+        )
+
+        tk.Label(
+            top,
+            text="Doctor Records",
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 13, "bold")
+        ).pack(side="left")
+
+        tk.Button(
+            top,
+            text="Delete",
+            bg="#FEE2E2",
+            fg=DANGER,
+            bd=0,
+            padx=14,
+            pady=7,
+            font=("Segoe UI", 9, "bold"),
+            command=self.delete_selected_doctor
+        ).pack(
+            side="right",
+            padx=(8, 0)
+        )
+
+        tk.Button(
+            top,
+            text="Edit",
+            bg=LIGHT_BLUE,
+            fg=PRIMARY,
+            bd=0,
+            padx=14,
+            pady=7,
+            font=("Segoe UI", 9, "bold"),
+            command=self.edit_selected_doctor
+        ).pack(side="right")
+
+        cols = (
+            "ID",
+            "Name",
+            "Specialty",
+            "Phone",
+            "Email",
+            "Availability"
+        )
+
+        self.doctor_tree = ttk.Treeview(
+            table_card,
+            columns=cols,
+            show="headings"
+        )
+
+        widths = {
+            "ID": 50,
+            "Name": 170,
+            "Specialty": 170,
+            "Phone": 130,
+            "Email": 210,
+            "Availability": 180
+        }
+
+        for col in cols:
+            self.doctor_tree.heading(
+                col,
+                text=col
+            )
+            self.doctor_tree.column(
+                col,
+                width=widths[col],
+                anchor="center"
+            )
+
+        self.doctor_tree.pack(
+            fill="both",
+            expand=True,
+            padx=18,
+            pady=(0, 18)
+        )
+
+        self.load_doctors()
+
+    def load_doctors(self):
+        for item in self.doctor_tree.get_children():
+            self.doctor_tree.delete(item)
+
+        search = self.doctor_search_var.get().strip()
+
+        rows = self.db.get_doctors(search)
+
+        for row in rows:
+            self.doctor_tree.insert(
+                "",
+                "end",
+                values=(
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5]
+                )
+            )
+
+    def open_doctor_form(self, doctor_id=None):
+        win = tk.Toplevel(self)
+
+        win.title(
+            "Edit Doctor"
+            if doctor_id
+            else "Add Doctor"
+        )
+
+        win.geometry("500x620")
+        win.resizable(False, False)
+        win.configure(bg=WHITE)
+        win.transient(self)
+        win.grab_set()
+
+        tk.Label(
+            win,
+            text=(
+                "Edit Doctor"
+                if doctor_id
+                else "Add New Doctor"
+            ),
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 20, "bold")
+        ).pack(
+            anchor="w",
+            padx=28,
+            pady=(25, 15)
+        )
+
+        form = tk.Frame(
+            win,
+            bg=WHITE
+        )
+        form.pack(
+            fill="both",
+            expand=True,
+            padx=28
+        )
+
+        name_var = tk.StringVar()
+        specialty_var = tk.StringVar()
+        phone_var = tk.StringVar()
+        email_var = tk.StringVar()
+        availability_var = tk.StringVar(
+            value="Mon - Sat, 10:00 - 17:00"
+        )
+
+        fields = [
+            ("Doctor Name", name_var),
+            ("Specialty", specialty_var),
+            ("Phone Number", phone_var),
+            ("Email Address", email_var),
+            ("Availability", availability_var)
+        ]
+
+        for label, variable in fields:
+            self.input_label(
+                form,
+                label
+            )
+
+            tk.Entry(
+                form,
+                textvariable=variable,
+                bg="#F8FAFC",
+                relief="flat",
+                font=("Segoe UI", 10)
+            ).pack(
+                fill="x",
+                ipady=9
+            )
+
+        if doctor_id:
+            data = self.db.get_doctor_by_id(
+                doctor_id
+            )
+
+            if data:
+                name_var.set(data[1])
+                specialty_var.set(data[2])
+                phone_var.set(data[3] or "")
+                email_var.set(data[4] or "")
+                availability_var.set(data[5] or "")
+
+        def save():
+            name = name_var.get().strip()
+            specialty = specialty_var.get().strip()
+
+            if not name or not specialty:
+                messagebox.showwarning(
+                    "Missing Data",
+                    "Doctor name and specialty are required."
+                )
+                return
+
+            if doctor_id:
+                self.db.update_doctor(
+                    doctor_id,
+                    name,
+                    specialty,
+                    phone_var.get().strip(),
+                    email_var.get().strip(),
+                    availability_var.get().strip()
+                )
+            else:
+                self.db.add_doctor(
+                    name,
+                    specialty,
+                    phone_var.get().strip(),
+                    email_var.get().strip(),
+                    availability_var.get().strip()
+                )
+
+            win.destroy()
+            self.show_doctors()
+
+        tk.Button(
+            win,
+            text=(
+                "Update Doctor"
+                if doctor_id
+                else "Add Doctor"
+            ),
+            bg=PRIMARY,
+            fg=WHITE,
+            bd=0,
+            pady=12,
+            font=("Segoe UI", 10, "bold"),
+            command=save
+        ).pack(
+            fill="x",
+            padx=28,
+            pady=24
+        )
+
+    def edit_selected_doctor(self):
+        selected = self.doctor_tree.selection()
+
+        if not selected:
+            messagebox.showwarning(
+                "Select Doctor",
+                "Please select a doctor."
+            )
+            return
+
+        values = self.doctor_tree.item(
+            selected[0],
+            "values"
+        )
+
+        self.open_doctor_form(
+            int(values[0])
+        )
+
+    def delete_selected_doctor(self):
+        selected = self.doctor_tree.selection()
+
+        if not selected:
+            messagebox.showwarning(
+                "Select Doctor",
+                "Please select a doctor."
+            )
+            return
+
+        values = self.doctor_tree.item(
+            selected[0],
+            "values"
+        )
+
+        if messagebox.askyesno(
+            "Delete Doctor",
+            "Deleting this doctor will also remove their appointments.\nContinue?"
+        ):
+            self.db.delete_doctor(
+                int(values[0])
+            )
+            self.load_doctors()
+
+    # ========================================================
+    # REPORTS PAGE
+    # ========================================================
+
+    def show_reports(self):
+        self.clear_main()
+
+        self.page_header(
+            "Reports",
+            "View appointment statistics and export records"
+        )
+
+        stats = self.db.get_status_counts()
+
+        summary = tk.Frame(
+            self.main,
+            bg=BG
+        )
+        summary.pack(
+            fill="x",
+            padx=30,
+            pady=(0, 18)
+        )
+
+        report_cards = [
+            ("Scheduled", stats["Scheduled"], PRIMARY),
+            ("Completed", stats["Completed"], SUCCESS),
+            ("Cancelled", stats["Cancelled"], DANGER)
+        ]
+
+        for i, (title, value, color) in enumerate(report_cards):
+            summary.grid_columnconfigure(
+                i,
+                weight=1
+            )
+
+            card = tk.Frame(
+                summary,
+                bg=WHITE,
+                highlightbackground=BORDER,
+                highlightthickness=1
+            )
+
+            card.grid(
+                row=0,
+                column=i,
+                sticky="nsew",
+                padx=7
+            )
+
+            tk.Label(
+                card,
+                text=title,
+                bg=WHITE,
+                fg=MUTED,
+                font=("Segoe UI", 10, "bold")
+            ).pack(
+                anchor="w",
+                padx=20,
+                pady=(17, 5)
+            )
+
+            tk.Label(
+                card,
+                text=str(value),
+                bg=WHITE,
+                fg=color,
+                font=("Segoe UI", 26, "bold")
+            ).pack(
+                anchor="w",
+                padx=20,
+                pady=(0, 17)
+            )
+
+        report_card = self.card(self.main)
+        report_card.pack(
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=(0, 28)
+        )
+
+        top = tk.Frame(
+            report_card,
+            bg=WHITE
+        )
+        top.pack(
+            fill="x",
+            padx=20,
+            pady=18
+        )
+
+        tk.Label(
+            top,
+            text="Appointment Report",
+            bg=WHITE,
+            fg=TEXT,
+            font=("Segoe UI", 14, "bold")
+        ).pack(side="left")
+
+        tk.Button(
+            top,
+            text="Export CSV",
+            bg=SUCCESS,
+            fg=WHITE,
+            bd=0,
+            padx=18,
+            pady=9,
+            font=("Segoe UI", 9, "bold"),
+            command=self.export_csv
+        ).pack(side="right")
+
+        cols = (
+            "ID",
+            "Patient",
+            "Doctor",
+            "Specialty",
+            "Date",
+            "Time",
+            "Status",
+            "Reason"
+        )
+
+        report_tree = ttk.Treeview(
+            report_card,
+            columns=cols,
+            show="headings"
+        )
+
+        widths = {
+            "ID": 50,
+            "Patient": 150,
+            "Doctor": 150,
+            "Specialty": 130,
+            "Date": 110,
+            "Time": 85,
+            "Status": 100,
+            "Reason": 220
+        }
+
+        for col in cols:
+            report_tree.heading(
+                col,
+                text=col
+            )
+            report_tree.column(
+                col,
+                width=widths[col],
+                anchor="center"
+            )
+
+        report_tree.pack(
+            fill="both",
+            expand=True,
+            padx=18,
+            pady=(0, 18)
+        )
+
+        rows = self.db.get_appointments()
+
+        for row in rows:
+            report_tree.insert(
+                "",
+                "end",
+                values=(
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7]
+                )
+            )
+
+    def export_csv(self):
+        rows = self.db.get_appointments()
+
+        if not rows:
+            messagebox.showinfo(
+                "No Data",
+                "No appointment records available."
+            )
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[
+                ("CSV Files", "*.csv")
+            ],
+            initialfile="appointment_report.csv"
+        )
+
+        if not path:
+            return
+
+        with open(
+            path,
+            "w",
+            newline="",
+            encoding="utf-8"
+        ) as file:
+            writer = csv.writer(file)
+
+            writer.writerow([
+                "ID",
+                "Patient",
+                "Doctor",
+                "Specialty",
+                "Date",
+                "Time",
+                "Status",
+                "Reason",
+                "Notes"
+            ])
+
+            for row in rows:
+                writer.writerow([
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8]
+                ])
+
+        messagebox.showinfo(
+            "Export Successful",
+            "Appointment report exported successfully."
+        )
+
+    # ========================================================
+    # APP CLOSE
+    # ========================================================
+
+    def on_close(self):
+        self.db.close()
+        self.destroy()
+
+
+# ============================================================
+# START APP
+# ============================================================
+
+if __name__ == "__main__":
+    app = MediBookApp()
+    app.mainloop()
