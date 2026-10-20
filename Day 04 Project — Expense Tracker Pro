@@ -1,0 +1,466 @@
+import csv
+import sqlite3
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from datetime import date, datetime
+
+APP_TITLE = "Expense Tracker Pro"
+DB_FILE = "expense_tracker.db"
+BG, SIDEBAR, PANEL, CARD = "#0b1220", "#0f1b2d", "#142238", "#192b45"
+BORDER, TEXT, MUTED = "#2b405e", "#eef4ff", "#9eb0c9"
+BLUE, GREEN, RED, GOLD = "#4f8cff", "#24c78e", "#ff6378", "#f4bb4f"
+CATEGORIES = ["Food", "Transport", "Shopping", "Bills", "Education", "Health",
+              "Entertainment", "Travel", "Salary", "Freelance", "Investment", "Other"]
+PAYMENTS = ["Cash", "UPI", "Card", "Bank Transfer", "Cheque", "Other"]
+
+
+def money(value):
+    return f"₹{float(value or 0):,.2f}"
+
+
+class Store:
+    def __init__(self):
+        self.conn = sqlite3.connect(DB_FILE)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                txn_date TEXT NOT NULL,
+                txn_type TEXT NOT NULL CHECK(txn_type IN ('Income','Expense')),
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                amount REAL NOT NULL CHECK(amount > 0),
+                payment_method TEXT NOT NULL DEFAULT 'Cash',
+                notes TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        self.conn.commit()
+
+    def add(self, data):
+        self.conn.execute("""INSERT INTO transactions
+            (txn_date,txn_type,category,title,amount,payment_method,notes)
+            VALUES (?,?,?,?,?,?,?)""", data)
+        self.conn.commit()
+
+    def update(self, txn_id, data):
+        self.conn.execute("""UPDATE transactions SET txn_date=?,txn_type=?,category=?,
+            title=?,amount=?,payment_method=?,notes=? WHERE id=?""", (*data, txn_id))
+        self.conn.commit()
+
+    def delete(self, txn_id):
+        self.conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
+        self.conn.commit()
+
+    def get(self, txn_id):
+        return self.conn.execute("SELECT * FROM transactions WHERE id=?", (txn_id,)).fetchone()
+
+    def list(self, search="", month="All months", txn_type="All types"):
+        query, args = "SELECT * FROM transactions WHERE 1=1", []
+        if search.strip():
+            term = f"%{search.strip()}%"
+            query += " AND (title LIKE ? OR category LIKE ? OR notes LIKE ? OR payment_method LIKE ?)"
+            args.extend([term] * 4)
+        if month != "All months":
+            query += " AND substr(txn_date,1,7)=?"
+            args.append(month)
+        if txn_type != "All types":
+            query += " AND txn_type=?"
+            args.append(txn_type)
+        query += " ORDER BY txn_date DESC,id DESC"
+        return self.conn.execute(query, args).fetchall()
+
+    def totals(self, month=None):
+        where, args = ("", []) if not month else ("WHERE substr(txn_date,1,7)=?", [month])
+        row = self.conn.execute(f"""SELECT
+            COALESCE(SUM(CASE WHEN txn_type='Income' THEN amount ELSE 0 END),0) income,
+            COALESCE(SUM(CASE WHEN txn_type='Expense' THEN amount ELSE 0 END),0) expenses,
+            COUNT(*) count FROM transactions {where}""", args).fetchone()
+        return dict(row)
+
+    def category_totals(self, month=None):
+        where, args = "WHERE txn_type='Expense'", []
+        if month:
+            where += " AND substr(txn_date,1,7)=?"
+            args.append(month)
+        return self.conn.execute(f"""SELECT category,SUM(amount) total FROM transactions
+            {where} GROUP BY category ORDER BY total DESC""", args).fetchall()
+
+    def months(self):
+        rows = self.conn.execute("""SELECT DISTINCT substr(txn_date,1,7) month
+            FROM transactions ORDER BY month DESC""").fetchall()
+        return ["All months"] + [r["month"] for r in rows]
+
+    def close(self):
+        self.conn.close()
+
+
+class ExpenseTracker(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.store = Store()
+        self.selected_id = None
+        self.title(APP_TITLE)
+        self.geometry("1320x820")
+        self.minsize(1080, 700)
+        self.configure(bg=BG)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.setup_style()
+        self.build_shell()
+        self.show_dashboard()
+
+    def setup_style(self):
+        s = ttk.Style(self)
+        s.theme_use("clam")
+        s.configure("Treeview", background=PANEL, foreground=TEXT, fieldbackground=PANEL,
+                    rowheight=32, borderwidth=0, font=("Segoe UI", 10))
+        s.configure("Treeview.Heading", background="#203653", foreground=TEXT,
+                    relief="flat", font=("Segoe UI", 9, "bold"))
+        s.map("Treeview", background=[("selected", "#294d7a")])
+        s.configure("TCombobox", fieldbackground=CARD, background=CARD, foreground=TEXT,
+                    arrowcolor=TEXT)
+        s.map("TCombobox", fieldbackground=[("readonly", CARD)],
+              foreground=[("readonly", TEXT)])
+
+    def button(self, parent, text, command, color=BLUE):
+        b = tk.Button(parent, text=text, command=command, bg=color, fg="white",
+                      activebackground=color, activeforeground="white", relief="flat",
+                      bd=0, cursor="hand2", font=("Segoe UI", 10, "bold"),
+                      padx=14, pady=9)
+        b.bind("<Enter>", lambda _e: b.configure(relief="raised"))
+        b.bind("<Leave>", lambda _e: b.configure(relief="flat"))
+        return b
+
+    def label(self, parent, text, size=10, color=TEXT, bold=False):
+        return tk.Label(parent, text=text, bg=parent.cget("bg"), fg=color,
+                        font=("Segoe UI", size, "bold" if bold else "normal"))
+
+    def field(self, parent, initial="", show=None):
+        e = tk.Entry(parent, bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat",
+                     font=("Segoe UI", 10), show=show, highlightthickness=1,
+                     highlightbackground=BORDER, highlightcolor=BLUE)
+        e.insert(0, initial)
+        e.pack(fill="x", ipady=8, pady=(5, 12))
+        return e
+
+    def combo(self, parent, values, initial):
+        c = ttk.Combobox(parent, values=values, state="readonly", font=("Segoe UI", 10))
+        c.set(initial)
+        c.pack(fill="x", ipady=5, pady=(5, 12))
+        return c
+
+    def build_shell(self):
+        shell = tk.Frame(self, bg=BG)
+        shell.pack(fill="both", expand=True)
+        sidebar = tk.Frame(shell, bg=SIDEBAR, width=220)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+        tk.Label(sidebar, text="◈  EXPENSE\n    TRACKER PRO", bg=SIDEBAR, fg=TEXT,
+                 justify="left", font=("Segoe UI", 17, "bold")).pack(anchor="w", padx=22, pady=(28, 8))
+        self.label(sidebar, "PERSONAL FINANCE", 8, MUTED, True).pack(anchor="w", padx=24, pady=(0, 28))
+        self.nav_buttons = {}
+        for name, icon in [("Dashboard", "▦"), ("Transactions", "⇄"),
+                           ("Add Transaction", "+"), ("Reports & Export", "▤")]:
+            b = tk.Button(sidebar, text=f"  {icon}   {name}",
+                          command=lambda n=name: self.navigate(n), anchor="w",
+                          bg=SIDEBAR, fg=MUTED, activebackground="#203653",
+                          activeforeground=TEXT, relief="flat", bd=0, padx=16, pady=13,
+                          font=("Segoe UI", 10, "bold"), cursor="hand2")
+            b.pack(fill="x", padx=10, pady=2)
+            self.nav_buttons[name] = b
+        tk.Frame(sidebar, bg=SIDEBAR).pack(fill="both", expand=True)
+        tk.Frame(sidebar, bg=BORDER, height=1).pack(fill="x", padx=18)
+        self.label(sidebar, "DAY 05 • 100 DAYS OF CODE", 8, MUTED, True).pack(anchor="w", padx=20, pady=18)
+        content = tk.Frame(shell, bg=BG)
+        content.pack(side="left", fill="both", expand=True)
+        topbar = tk.Frame(content, bg=BG)
+        topbar.pack(fill="x", padx=30, pady=(22, 12))
+        self.page_title = tk.Label(topbar, text="", bg=BG, fg=TEXT, font=("Segoe UI", 23, "bold"))
+        self.page_title.pack(side="left")
+        tk.Label(topbar, text=date.today().strftime("%d %b %Y"), bg=BG, fg=MUTED,
+                 font=("Segoe UI", 10)).pack(side="right", pady=8)
+        self.body = tk.Frame(content, bg=BG)
+        self.body.pack(fill="both", expand=True, padx=30, pady=(0, 25))
+
+    def navigate(self, page):
+        {"Dashboard": self.show_dashboard, "Transactions": self.show_transactions,
+         "Add Transaction": self.show_form, "Reports & Export": self.show_reports}[page]()
+
+    def prepare_page(self, title):
+        self.page_title.config(text=title)
+        for name, b in self.nav_buttons.items():
+            b.configure(bg="#203653" if name == title else SIDEBAR,
+                        fg=TEXT if name == title else MUTED)
+        for w in self.body.winfo_children():
+            w.destroy()
+
+    def card(self, parent, title, value, accent, subtitle):
+        f = tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
+        self.label(f, title.upper(), 9, MUTED, True).pack(anchor="w", padx=18, pady=(16, 7))
+        tk.Label(f, text=value, bg=CARD, fg=accent, font=("Segoe UI", 22, "bold")).pack(anchor="w", padx=18)
+        self.label(f, subtitle, 9, MUTED).pack(anchor="w", padx=18, pady=(5, 15))
+        return f
+
+    def show_dashboard(self):
+        self.prepare_page("Dashboard")
+        month = date.today().strftime("%Y-%m")
+        t, all_t = self.store.totals(month), self.store.totals()
+        cards = tk.Frame(self.body, bg=BG)
+        cards.pack(fill="x", pady=(0, 18))
+        items = [
+            ("This Month Income", money(t["income"]), GREEN, "Money received"),
+            ("This Month Expenses", money(t["expenses"]), RED, "Money spent"),
+            ("Overall Balance", money(all_t["income"]-all_t["expenses"]), BLUE, "Income minus expenses"),
+            ("Transactions", str(all_t["count"]), GOLD, "All recorded entries")]
+        for i, item in enumerate(items):
+            self.card(cards, *item).grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 9, 0))
+            cards.columnconfigure(i, weight=1)
+        mid = tk.Frame(self.body, bg=BG)
+        mid.pack(fill="both", expand=True)
+        chart = tk.Frame(mid, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
+        chart.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        self.label(chart, "Monthly Money Flow", 14, TEXT, True).pack(anchor="w", padx=22, pady=(20, 3))
+        self.label(chart, "Income vs expenses • current month", 9, MUTED).pack(anchor="w", padx=22, pady=(0, 12))
+        self.draw_chart(chart, t["income"], t["expenses"])
+        cat = tk.Frame(mid, bg=PANEL, width=300, highlightthickness=1, highlightbackground=BORDER)
+        cat.pack(side="left", fill="y")
+        cat.pack_propagate(False)
+        self.label(cat, "Spending by Category", 13, TEXT, True).pack(anchor="w", padx=18, pady=(20, 4))
+        self.label(cat, "This month", 9, MUTED).pack(anchor="w", padx=18, pady=(0, 12))
+        self.draw_categories(cat, month)
+        recent = tk.Frame(self.body, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
+        recent.pack(fill="x", pady=(18, 0))
+        head = tk.Frame(recent, bg=PANEL)
+        head.pack(fill="x", padx=18, pady=(13, 8))
+        self.label(head, "Recent Transactions", 12, TEXT, True).pack(side="left")
+        self.button(head, "View all", self.show_transactions, "#203d60").pack(side="right")
+        tree = ttk.Treeview(recent, columns=("date", "title", "category", "type", "amount"),
+                            show="headings", height=4)
+        for c, h, width in [("date","DATE",120),("title","DESCRIPTION",260),
+                            ("category","CATEGORY",150),("type","TYPE",100),("amount","AMOUNT",140)]:
+            tree.heading(c, text=h); tree.column(c, width=width, anchor="w")
+        for r in self.store.list()[:4]:
+            tree.insert("", "end", values=(r["txn_date"], r["title"], r["category"],
+                                          r["txn_type"], money(r["amount"])))
+        tree.pack(fill="x", padx=12, pady=(0, 12))
+
+    def draw_chart(self, parent, income, expenses):
+        canvas = tk.Canvas(parent, bg=PANEL, highlightthickness=0, height=250)
+        canvas.pack(fill="both", expand=True, padx=18, pady=12)
+        def draw(_event=None):
+            canvas.delete("all")
+            w, h = max(canvas.winfo_width(), 400), max(canvas.winfo_height(), 220)
+            left, right, top, bottom = 45, w-25, 20, h-45
+            canvas.create_line(left, bottom, right, bottom, fill=BORDER, width=2)
+            maximum = max(float(income), float(expenses), 1)
+            for i in range(1, 5):
+                y = bottom-(bottom-top)*i/4
+                canvas.create_line(left, y, right, y, fill="#243953", dash=(3,4))
+            bar_w = min(100, (right-left)/5)
+            for center, value, color, title in [
+                (left+(right-left)*.34, income, GREEN, "Income"),
+                (left+(right-left)*.72, expenses, RED, "Expenses")]:
+                bh = (bottom-top)*float(value)/maximum
+                canvas.create_rectangle(center-bar_w/2, bottom-bh, center+bar_w/2, bottom, fill=color, outline="")
+                canvas.create_text(center, max(top+10, bottom-bh-15), text=money(value),
+                                  fill=TEXT, font=("Segoe UI", 10, "bold"))
+                canvas.create_text(center, bottom+22, text=title, fill=MUTED,
+                                   font=("Segoe UI", 10, "bold"))
+        canvas.bind("<Configure>", draw)
+        canvas.after(100, draw)
+
+    def draw_categories(self, parent, month):
+        rows = self.store.category_totals(month)
+        total = sum(float(r["total"]) for r in rows)
+        if not rows:
+            self.label(parent, "No expenses this month yet.", 10, MUTED).pack(anchor="w", padx=18, pady=18)
+            return
+        for r in rows[:7]:
+            line = tk.Frame(parent, bg=PANEL)
+            line.pack(fill="x", padx=18, pady=7)
+            self.label(line, r["category"], 9, TEXT, True).pack(side="left")
+            self.label(line, money(r["total"]), 9, MUTED).pack(side="right")
+            bar = tk.Frame(parent, bg="#263b56", height=6)
+            bar.pack(fill="x", padx=18, pady=(0, 4)); bar.pack_propagate(False)
+            tk.Frame(bar, bg=BLUE, width=max(1, int(240*float(r["total"])/total))).pack(side="left", fill="y")
+
+    def show_transactions(self):
+        self.prepare_page("Transactions")
+        filters = tk.Frame(self.body, bg=PANEL)
+        filters.pack(fill="x", pady=(0, 14))
+        self.search_var, self.month_var, self.type_var = tk.StringVar(), tk.StringVar(value="All months"), tk.StringVar(value="All types")
+        self.label(filters, "Search", 9, MUTED, True).pack(side="left", padx=(14,6), pady=14)
+        search = tk.Entry(filters, textvariable=self.search_var, bg=CARD, fg=TEXT,
+                          insertbackground=TEXT, relief="flat", width=23, font=("Segoe UI",10))
+        search.pack(side="left", ipady=8, padx=(0,12), pady=10)
+        search.bind("<KeyRelease>", lambda _e: self.refresh_transactions())
+        self.label(filters, "Month", 9, MUTED, True).pack(side="left", padx=5)
+        mc = ttk.Combobox(filters, textvariable=self.month_var, values=self.store.months(), state="readonly", width=13)
+        mc.pack(side="left", padx=5, ipady=5); mc.bind("<<ComboboxSelected>>", lambda _e: self.refresh_transactions())
+        tc = ttk.Combobox(filters, textvariable=self.type_var, values=["All types","Income","Expense"], state="readonly", width=12)
+        tc.pack(side="left", padx=5, ipady=5); tc.bind("<<ComboboxSelected>>", lambda _e: self.refresh_transactions())
+        self.button(filters, "＋ Add", self.show_form).pack(side="right", padx=12, pady=8)
+        table = tk.Frame(self.body, bg=PANEL); table.pack(fill="both", expand=True)
+        cols = ("id","date","title","category","type","amount","payment","notes")
+        self.txn_tree = ttk.Treeview(table, columns=cols, show="headings")
+        headings = {"id":"ID","date":"DATE","title":"DESCRIPTION","category":"CATEGORY",
+                    "type":"TYPE","amount":"AMOUNT","payment":"PAYMENT","notes":"NOTES"}
+        widths = {"id":50,"date":100,"title":180,"category":120,"type":90,"amount":120,"payment":110,"notes":180}
+        for c in cols:
+            self.txn_tree.heading(c, text=headings[c]); self.txn_tree.column(c, width=widths[c], anchor="w")
+        self.txn_tree.pack(fill="both", expand=True, padx=10, pady=10)
+        self.txn_tree.bind("<<TreeviewSelect>>", self.on_select)
+        actions = tk.Frame(self.body, bg=BG); actions.pack(fill="x", pady=(12,0))
+        self.selected_label = self.label(actions, "Select a transaction to edit or delete.", 9, MUTED)
+        self.selected_label.pack(side="left")
+        self.button(actions, "Edit Selected", self.edit_selected, "#315b86").pack(side="right", padx=5)
+        self.button(actions, "Delete Selected", self.delete_selected, RED).pack(side="right", padx=5)
+        self.refresh_transactions()
+
+    def refresh_transactions(self):
+        if not hasattr(self, "txn_tree") or not self.txn_tree.winfo_exists():
+            return
+        for item in self.txn_tree.get_children():
+            self.txn_tree.delete(item)
+        for r in self.store.list(self.search_var.get(), self.month_var.get(), self.type_var.get()):
+            self.txn_tree.insert("", "end", iid=str(r["id"]), values=(
+                r["id"], r["txn_date"], r["title"], r["category"], r["txn_type"],
+                money(r["amount"]), r["payment_method"], r["notes"]))
+
+    def on_select(self, _event=None):
+        sel = self.txn_tree.selection()
+        self.selected_id = int(sel[0]) if sel else None
+        if self.selected_id:
+            self.selected_label.config(text=f"Selected transaction ID: {self.selected_id}")
+
+    def edit_selected(self):
+        if not self.selected_id:
+            messagebox.showwarning("Select transaction", "Select a transaction first."); return
+        row = self.store.get(self.selected_id)
+        if row: self.show_form(row)
+
+    def delete_selected(self):
+        if not self.selected_id:
+            messagebox.showwarning("Select transaction", "Select a transaction first."); return
+        row = self.store.get(self.selected_id)
+        if row and messagebox.askyesno("Confirm delete", f"Delete '{row['title']}' ({money(row['amount'])})?"):
+            self.store.delete(self.selected_id)
+            self.selected_id = None
+            self.show_transactions()
+            messagebox.showinfo("Deleted", "Transaction deleted.")
+
+    def show_form(self, existing=None):
+        self.prepare_page("Edit Transaction" if existing else "Add Transaction")
+        edit = existing is not None
+        wrap = tk.Frame(self.body, bg=BG); wrap.pack(fill="both", expand=True)
+        form = tk.Frame(wrap, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
+        form.pack(side="left", fill="both", expand=True, padx=(0,14))
+        side = tk.Frame(wrap, bg=CARD, width=285); side.pack(side="left", fill="y"); side.pack_propagate(False)
+        self.label(form, "Transaction Details", 15, TEXT, True).pack(anchor="w", padx=25, pady=(24,5))
+        self.label(form, "Keep your financial records clear and organized.", 9, MUTED).pack(anchor="w", padx=25, pady=(0,18))
+        grid = tk.Frame(form, bg=PANEL); grid.pack(fill="x", padx=25)
+        grid.columnconfigure((0,1), weight=1)
+        def field(title, row, col, kind="entry", values=None, initial=""):
+            cell = tk.Frame(grid, bg=PANEL); cell.grid(row=row, column=col, sticky="ew", padx=(0 if col==0 else 12,0), pady=3)
+            self.label(cell, title, 9, MUTED, True).pack(anchor="w")
+            return self.combo(cell, values, initial) if kind=="combo" else self.field(cell, initial)
+        self.form_date = field("DATE (YYYY-MM-DD)",0,0,initial=existing["txn_date"] if edit else date.today().isoformat())
+        self.form_type = field("TYPE",0,1,"combo",["Expense","Income"],existing["txn_type"] if edit else "Expense")
+        self.form_title = field("DESCRIPTION",1,0,initial=existing["title"] if edit else "")
+        self.form_category = field("CATEGORY",1,1,"combo",CATEGORIES,existing["category"] if edit else "Food")
+        self.form_amount = field("AMOUNT (₹)",2,0,initial=str(existing["amount"]) if edit else "")
+        self.form_payment = field("PAYMENT METHOD",2,1,"combo",PAYMENTS,existing["payment_method"] if edit else "Cash")
+        notes_box = tk.Frame(form, bg=PANEL); notes_box.pack(fill="x", padx=25, pady=(8,12))
+        self.label(notes_box, "NOTES (OPTIONAL)", 9, MUTED, True).pack(anchor="w")
+        self.form_notes = tk.Text(notes_box, height=4, bg=CARD, fg=TEXT, insertbackground=TEXT,
+                                  relief="flat", wrap="word", font=("Segoe UI",10),
+                                  highlightthickness=1, highlightbackground=BORDER)
+        self.form_notes.pack(fill="x", pady=(5,0))
+        if edit and existing["notes"]: self.form_notes.insert("1.0", existing["notes"])
+        buttons = tk.Frame(form, bg=PANEL); buttons.pack(fill="x", padx=25, pady=(5,22))
+        self.button(buttons, "Save Transaction", lambda: self.save_transaction(existing["id"] if edit else None)).pack(side="left")
+        self.button(buttons, "Cancel", self.show_transactions, "#30445e").pack(side="left", padx=10)
+        self.label(side, "SMART RECORD-KEEPING", 10, GREEN, True).pack(anchor="w", padx=20, pady=(24,10))
+        for tip in ["Use the actual transaction date.","Pick the closest category.",
+                    "Record income and expenses separately.","Add notes when useful."]:
+            tk.Label(side, text="✓  "+tip, bg=CARD, fg=TEXT, wraplength=235, justify="left",
+                     font=("Segoe UI",10)).pack(anchor="w", padx=20, pady=10)
+        self.label(side, "Data is saved locally in SQLite.", 9, MUTED).pack(anchor="w", padx=20, pady=(20,0))
+
+    def save_transaction(self, txn_id=None):
+        txn_date, txn_type = self.form_date.get().strip(), self.form_type.get()
+        title, category = self.form_title.get().strip(), self.form_category.get()
+        amount_text, payment = self.form_amount.get().strip(), self.form_payment.get()
+        notes = self.form_notes.get("1.0", "end").strip()
+        try: datetime.strptime(txn_date, "%Y-%m-%d")
+        except ValueError:
+            messagebox.showerror("Invalid date", "Date must use YYYY-MM-DD format."); return
+        if not title:
+            messagebox.showwarning("Required", "Please enter a description."); return
+        try:
+            amount = float(amount_text)
+            if amount <= 0: raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid amount", "Enter an amount greater than zero."); return
+        data = (txn_date, txn_type, category, title, amount, payment, notes)
+        try:
+            if txn_id:
+                self.store.update(txn_id, data); msg = "Transaction updated successfully."
+            else:
+                self.store.add(data); msg = "Transaction saved successfully."
+        except sqlite3.Error as exc:
+            messagebox.showerror("Database error", str(exc)); return
+        messagebox.showinfo("Saved", msg)
+        self.show_dashboard()
+
+    def show_reports(self):
+        self.prepare_page("Reports & Export")
+        total, month = self.store.totals(), date.today().strftime("%Y-%m")
+        current = self.store.totals(month)
+        stats = tk.Frame(self.body, bg=BG); stats.pack(fill="x", pady=(0,20))
+        for i, item in enumerate([
+            ("All-Time Income",money(total["income"]),GREEN,"All recorded dates"),
+            ("All-Time Expenses",money(total["expenses"]),RED,"All recorded dates"),
+            ("Current Month Balance",money(current["income"]-current["expenses"]),BLUE,month)]):
+            self.card(stats,*item).grid(row=0,column=i,sticky="nsew",padx=(0 if i==0 else 10,0))
+            stats.columnconfigure(i,weight=1)
+        panel = tk.Frame(self.body,bg=PANEL,highlightthickness=1,highlightbackground=BORDER)
+        panel.pack(fill="both",expand=True)
+        self.label(panel,"Export your financial records",16,TEXT,True).pack(anchor="w",padx=28,pady=(28,8))
+        self.label(panel,"CSV files open in Excel, Google Sheets, and LibreOffice.",10,MUTED).pack(anchor="w",padx=28,pady=(0,25))
+        self.button(panel,"Export All Transactions to CSV",self.export_csv,GREEN).pack(anchor="w",padx=28,pady=8)
+        self.button(panel,"Export Current Month to CSV",lambda:self.export_csv(month),BLUE).pack(anchor="w",padx=28,pady=8)
+        self.label(panel,"Expense breakdown by category",12,TEXT,True).pack(anchor="w",padx=28,pady=(25,8))
+        rows = self.store.category_totals()
+        if not rows: self.label(panel,"No expense records available yet.",10,MUTED).pack(anchor="w",padx=28,pady=5)
+        for r in rows:
+            line=tk.Frame(panel,bg=PANEL); line.pack(fill="x",padx=28,pady=5)
+            self.label(line,r["category"],10,TEXT).pack(side="left")
+            self.label(line,money(r["total"]),10,RED,True).pack(side="right")
+
+    def export_csv(self, month=None):
+        rows = self.store.list(month=month or "All months")
+        if not rows:
+            messagebox.showinfo("No data","There are no transactions to export."); return
+        name = f"expense_report_{month}.csv" if month else "expense_report_all.csv"
+        path = filedialog.asksaveasfilename(title="Export transactions",defaultextension=".csv",
+                                            initialfile=name,filetypes=[("CSV files","*.csv")])
+        if not path: return
+        try:
+            with open(path,"w",newline="",encoding="utf-8-sig") as f:
+                writer=csv.writer(f)
+                writer.writerow(["Transaction ID","Date","Type","Category","Description","Amount","Payment Method","Notes"])
+                for r in rows:
+                    writer.writerow([r["id"],r["txn_date"],r["txn_type"],r["category"],r["title"],
+                                     r["amount"],r["payment_method"],r["notes"]])
+            messagebox.showinfo("Export complete",f"CSV saved successfully:\n{path}")
+        except OSError as exc: messagebox.showerror("Export failed",str(exc))
+
+    def on_close(self):
+        self.store.close()
+        self.destroy()
+
+
+if __name__ == "__main__":
+    app = ExpenseTracker()
+    app.mainloop()
