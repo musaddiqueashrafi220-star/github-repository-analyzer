@@ -1,0 +1,617 @@
+"""
+PC Storage Intelligence — Day 06/100
+Windows 10 compatible, standard-library-only desktop utility.
+
+Features:
+- Background folder/drive scanning with progress and cancellation
+- Storage summary, largest files, extension breakdown
+- Duplicate detection using size + SHA-256 verification
+- Search/filter scanned files
+- Review-only cleanup candidates (no automatic deletion)
+- Explicitly confirmed deletion of selected files
+- CSV export
+- Persistent scan results are not saved; all results remain in memory
+"""
+
+import os
+import csv
+import hashlib
+import threading
+import queue
+import time
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from collections import defaultdict
+from datetime import datetime
+
+APP_NAME = "PC Storage Intelligence"
+BG = "#0b1220"
+PANEL = "#111c2e"
+PANEL2 = "#17243a"
+TEXT = "#e8eef8"
+MUTED = "#98a8c2"
+ACCENT = "#60a5fa"
+GREEN = "#34d399"
+ORANGE = "#fbbf24"
+RED = "#fb7185"
+
+def fmt_size(num):
+    try:
+        n = float(num)
+    except (TypeError, ValueError):
+        return "—"
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    for unit in units:
+        if abs(n) < 1024 or unit == units[-1]:
+            return f"{n:,.1f} {unit}" if unit != "B" else f"{int(n):,} B"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+def fmt_date(timestamp):
+    try:
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    except (OSError, ValueError, OverflowError):
+        return "Unknown"
+
+def human_path(path):
+    return os.path.normpath(path)
+
+class StorageIntelligence:
+    def __init__(self, root):
+        self.root = root
+        self.root.title(f"{APP_NAME}  |  Day 06/100")
+        self.root.geometry("1320x820")
+        self.root.minsize(1000, 650)
+        self.root.configure(bg=BG)
+
+        self.files = []
+        self.file_by_path = {}
+        self.duplicates = []
+        self.scan_root = ""
+        self.scanning = False
+        self.cancel_event = threading.Event()
+        self.events = queue.Queue()
+        self.scan_started = None
+        self.current_tab = "Overview"
+        self.search_var = tk.StringVar()
+        self.ext_var = tk.StringVar(value="All types")
+        self.status_var = tk.StringVar(value="Ready — choose a folder or drive to begin.")
+        self.path_var = tk.StringVar(value=os.path.expanduser("~"))
+        self.min_size_var = tk.StringVar(value="100")
+        self.dupe_only_var = tk.BooleanVar(value=False)
+        self._configure_style()
+        self._build_ui()
+        self._poll_events()
+
+    def _configure_style(self):
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("Treeview", background=PANEL, foreground=TEXT,
+                        fieldbackground=PANEL, rowheight=29, borderwidth=0)
+        style.configure("Treeview.Heading", background=PANEL2, foreground=TEXT,
+                        relief="flat", font=("Segoe UI", 9, "bold"))
+        style.map("Treeview", background=[("selected", "#254c78")],
+                  foreground=[("selected", "#ffffff")])
+        style.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2,
+                        foreground=TEXT, arrowcolor=TEXT)
+        style.configure("Horizontal.TProgressbar", troughcolor=PANEL2,
+                        background=ACCENT, bordercolor=PANEL2, lightcolor=ACCENT,
+                        darkcolor=ACCENT)
+
+    def _build_ui(self):
+        header = tk.Frame(self.root, bg=BG)
+        header.pack(fill="x", padx=24, pady=(20, 12))
+        title_area = tk.Frame(header, bg=BG)
+        title_area.pack(side="left", fill="x", expand=True)
+        tk.Label(title_area, text="PC STORAGE INTELLIGENCE", bg=BG, fg=TEXT,
+                 font=("Segoe UI", 20, "bold")).pack(anchor="w")
+        tk.Label(title_area, text="Understand your disk. Find what consumes space. Clean up with confidence.",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(4, 0))
+        tk.Label(header, text="DAY 06 / 100", bg="#163456", fg="#93c5fd",
+                 font=("Segoe UI", 10, "bold"), padx=14, pady=8).pack(side="right")
+
+        controls = tk.Frame(self.root, bg=PANEL, padx=14, pady=12)
+        controls.pack(fill="x", padx=24, pady=(0, 12))
+        tk.Label(controls, text="SCAN LOCATION", bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w")
+        self.path_entry = tk.Entry(controls, textvariable=self.path_var, bg=PANEL2,
+                                   fg=TEXT, insertbackground=TEXT, relief="flat",
+                                   font=("Segoe UI", 10))
+        self.path_entry.grid(row=1, column=0, sticky="ew", padx=(0, 10), ipady=9)
+        self.browse_btn = self._button(controls, "Browse folder", self._browse, PANEL2, TEXT)
+        self.browse_btn.grid(row=1, column=1, padx=(0, 8))
+        self.scan_btn = self._button(controls, "▶  Start scan", self._start_scan, "#2563eb", "white")
+        self.scan_btn.grid(row=1, column=2, padx=(0, 8))
+        self.cancel_btn = self._button(controls, "■  Cancel", self._cancel_scan, "#3a2632", "#fda4af")
+        self.cancel_btn.grid(row=1, column=3)
+        controls.columnconfigure(0, weight=1)
+
+        progress_wrap = tk.Frame(self.root, bg=BG)
+        progress_wrap.pack(fill="x", padx=24, pady=(0, 12))
+        self.progress = ttk.Progressbar(progress_wrap, mode="indeterminate")
+        self.progress.pack(fill="x")
+        self.status_label = tk.Label(progress_wrap, textvariable=self.status_var, bg=BG, fg=MUTED,
+                                     font=("Segoe UI", 9), anchor="w")
+        self.status_label.pack(fill="x", pady=(5, 0))
+
+        self.cards = tk.Frame(self.root, bg=BG)
+        self.cards.pack(fill="x", padx=24, pady=(0, 14))
+        self.card_values = {}
+        for i, (key, label, value) in enumerate([
+            ("total", "SCANNED FILE SIZE", "—"),
+            ("count", "FILES FOUND", "—"),
+            ("folders", "FOLDERS VISITED", "—"),
+            ("duplicates", "DUPLICATE FILES", "—"),
+        ]):
+            card = tk.Frame(self.cards, bg=PANEL, padx=16, pady=13)
+            card.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 10, 0))
+            tk.Label(card, text=label, bg=PANEL, fg=MUTED,
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w")
+            val = tk.Label(card, text=value, bg=PANEL, fg=TEXT,
+                           font=("Segoe UI", 19, "bold"))
+            val.pack(anchor="w", pady=(6, 0))
+            self.card_values[key] = val
+            self.cards.columnconfigure(i, weight=1)
+
+        nav = tk.Frame(self.root, bg=BG)
+        nav.pack(fill="x", padx=24)
+        self.tab_buttons = {}
+        for tab in ("Overview", "All Files", "Duplicates", "Cleanup Review"):
+            btn = self._button(nav, tab, lambda t=tab: self._show_tab(t),
+                               "#1d4ed8" if tab == "Overview" else PANEL2, TEXT)
+            btn.pack(side="left", padx=(0, 8))
+            self.tab_buttons[tab] = btn
+
+        self.content = tk.Frame(self.root, bg=PANEL, padx=14, pady=14)
+        self.content.pack(fill="both", expand=True, padx=24, pady=(8, 12))
+        self._show_tab("Overview")
+
+        footer = tk.Frame(self.root, bg=BG)
+        footer.pack(fill="x", padx=24, pady=(0, 12))
+        tk.Label(footer, text="LOCAL SCAN  •  NO UPLOADS  •  DELETION REQUIRES CONFIRMATION",
+                 bg=BG, fg="#64748b", font=("Segoe UI", 8, "bold")).pack(side="left")
+        tk.Label(footer, text="Windows 10+  |  Python 3.10+ recommended",
+                 bg=BG, fg="#64748b", font=("Segoe UI", 8)).pack(side="right")
+
+    def _button(self, parent, label, command, bg, fg):
+        return tk.Button(parent, text=label, command=command, bg=bg, fg=fg,
+                         activebackground="#334155", activeforeground="white",
+                         relief="flat", bd=0, padx=13, pady=9,
+                         font=("Segoe UI", 9, "bold"), cursor="hand2")
+
+    def _clear_content(self):
+        for child in self.content.winfo_children():
+            child.destroy()
+
+    def _show_tab(self, tab):
+        self.current_tab = tab
+        for name, btn in self.tab_buttons.items():
+            btn.configure(bg="#1d4ed8" if name == tab else PANEL2)
+        self._clear_content()
+        if tab == "Overview":
+            self._overview()
+        elif tab == "All Files":
+            self._files_view()
+        elif tab == "Duplicates":
+            self._duplicates_view()
+        else:
+            self._cleanup_view()
+
+    def _overview(self):
+        top = tk.Frame(self.content, bg=PANEL)
+        top.pack(fill="both", expand=True)
+        left = tk.Frame(top, bg=PANEL)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 14))
+        right = tk.Frame(top, bg=PANEL)
+        right.pack(side="left", fill="both", expand=True)
+        tk.Label(left, text="Storage by file type", bg=PANEL, fg=TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
+        self.chart = tk.Canvas(left, bg=PANEL, highlightthickness=0, height=250)
+        self.chart.pack(fill="both", expand=True)
+        tk.Label(right, text="Largest files", bg=PANEL, fg=TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
+        self.large_tree = self._make_tree(right, [
+            ("name", "File", 240), ("size", "Size", 95), ("modified", "Modified", 120)
+        ], height=8)
+        self.large_tree._container.pack(fill="both", expand=True)
+        tk.Label(right, text="Quick insight", bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(14, 4))
+        self.insight_label = tk.Label(right, text="Scan a folder to generate storage insights.",
+                                       bg=PANEL, fg=TEXT, justify="left", wraplength=400,
+                                       font=("Segoe UI", 10))
+        self.insight_label.pack(anchor="w")
+        self._refresh_overview()
+
+    def _make_tree(self, parent, columns, height=12):
+        frame = tk.Frame(parent, bg=PANEL)
+        tree = ttk.Treeview(frame, columns=[c[0] for c in columns],
+                            show="headings", height=height, selectmode="extended")
+        for key, label, width in columns:
+            tree.heading(key, text=label)
+            tree.column(key, width=width, minwidth=60,
+                         anchor="w" if key in ("name", "path", "ext") else "center")
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        tree._container = frame
+        return tree
+
+    def _refresh_overview(self):
+        total = sum(f["size"] for f in self.files)
+        self.card_values["total"].configure(text=fmt_size(total))
+        self.card_values["count"].configure(text=f"{len(self.files):,}")
+        self.card_values["folders"].configure(text=f"{getattr(self, 'folder_count', 0):,}")
+        self.card_values["duplicates"].configure(text=f"{len(self.duplicates):,}")
+        if not hasattr(self, "chart") or not self.chart.winfo_exists():
+            return
+        self.chart.delete("all")
+        ext_totals = defaultdict(int)
+        for f in self.files:
+            ext_totals[f["ext"]] += f["size"]
+        items = sorted(ext_totals.items(), key=lambda x: x[1], reverse=True)[:8]
+        if not items:
+            self.chart.create_text(10, 20, text="No scan results yet", fill=MUTED,
+                                   anchor="nw", font=("Segoe UI", 10))
+        else:
+            max_size = max(v for _, v in items) or 1
+            y = 10
+            for ext, size in items:
+                self.chart.create_text(4, y + 8, text=ext[:13], fill=TEXT, anchor="w",
+                                       font=("Segoe UI", 9))
+                x0, x1 = 100, 100 + int(180 * size / max_size)
+                self.chart.create_rectangle(x0, y, x1, y + 17, fill=ACCENT, outline="")
+                self.chart.create_text(x1 + 6, y + 8, text=fmt_size(size), fill=MUTED,
+                                       anchor="w", font=("Segoe UI", 8))
+                y += 28
+        if hasattr(self, "large_tree") and self.large_tree.winfo_exists():
+            for item in self.large_tree.get_children():
+                self.large_tree.delete(item)
+            for f in sorted(self.files, key=lambda x: x["size"], reverse=True)[:10]:
+                self.large_tree.insert("", "end", values=(
+                    f["name"], fmt_size(f["size"]), fmt_date(f["mtime"])))
+        if hasattr(self, "insight_label") and self.insight_label.winfo_exists():
+            if self.files:
+                biggest = max(self.files, key=lambda x: x["size"])
+                total = sum(f["size"] for f in self.files)
+                self.insight_label.configure(
+                    text=f"• {len(self.files):,} files occupy {fmt_size(total)}.\n"
+                         f"• Largest file: {biggest['name']} ({fmt_size(biggest['size'])}).\n"
+                         f"• {len(self.duplicates)} duplicate file(s) detected.\n"
+                         "• Review files before removing anything.")
+            else:
+                self.insight_label.configure(text="Scan a folder to generate storage insights.")
+
+    def _browse(self):
+        folder = filedialog.askdirectory(title="Choose a folder or drive to scan",
+                                         initialdir=self.path_var.get() if os.path.isdir(self.path_var.get()) else os.path.expanduser("~"))
+        if folder:
+            self.path_var.set(folder)
+
+    def _start_scan(self):
+        if self.scanning:
+            return
+        path = os.path.abspath(os.path.expanduser(self.path_var.get().strip().strip('"')))
+        if not os.path.isdir(path):
+            messagebox.showerror("Invalid location", "Choose an existing folder or drive.")
+            return
+        self.scan_root = path
+        self.files = []
+        self.file_by_path = {}
+        self.duplicates = []
+        self.folder_count = 0
+        self.cancel_event.clear()
+        self.scanning = True
+        self.scan_started = time.time()
+        self.scan_btn.configure(state="disabled")
+        self.browse_btn.configure(state="disabled")
+        self.progress.start(12)
+        self.status_var.set(f"Scanning {path} …")
+        self._refresh_overview()
+        self._show_tab("Overview")
+        threading.Thread(target=self._scan_worker, args=(path,), daemon=True).start()
+
+    def _cancel_scan(self):
+        if self.scanning:
+            self.cancel_event.set()
+            self.status_var.set("Cancellation requested — finishing current file operation…")
+
+    def _scan_worker(self, root_path):
+        count = 0
+        folder_count = 0
+        total_size = 0
+        inaccessible = 0
+        try:
+            for current, dirs, names in os.walk(root_path, topdown=True, followlinks=False):
+                if self.cancel_event.is_set():
+                    break
+                # Do not follow directory symlinks and prune inaccessible/system-heavy folders by permission errors.
+                dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(current, d))]
+                folder_count += 1
+                for name in names:
+                    if self.cancel_event.is_set():
+                        break
+                    path = os.path.join(current, name)
+                    try:
+                        if os.path.islink(path):
+                            continue
+                        stat = os.stat(path, follow_symlinks=False)
+                        if not os.path.isfile(path):
+                            continue
+                        ext = os.path.splitext(name)[1].lower() or "[no extension]"
+                        record = {
+                            "path": path, "name": name, "size": stat.st_size,
+                            "mtime": stat.st_mtime, "ext": ext,
+                            "hash": None, "access": stat.st_mode
+                        }
+                        self.events.put(("file", record))
+                        count += 1
+                        total_size += stat.st_size
+                    except (OSError, PermissionError):
+                        inaccessible += 1
+                if folder_count % 25 == 0:
+                    self.events.put(("progress", (count, folder_count, total_size, current)))
+            self.events.put(("scan_done", (count, folder_count, total_size, inaccessible,
+                                            self.cancel_event.is_set())))
+        except Exception as exc:
+            self.events.put(("scan_error", str(exc)))
+
+    def _poll_events(self):
+        try:
+            while True:
+                event, data = self.events.get_nowait()
+                if event == "file":
+                    self.files.append(data)
+                    self.file_by_path[data["path"]] = data
+                    if len(self.files) % 100 == 0:
+                        self.status_var.set(f"Scanned {len(self.files):,} files · {data['path']}")
+                elif event == "progress":
+                    count, folders, size, current = data
+                    self.status_var.set(f"{count:,} files · {folders:,} folders · {fmt_size(size)} · {current}")
+                elif event == "scan_done":
+                    count, folders, size, inaccessible, cancelled = data
+                    self.scanning = False
+                    self.folder_count = folders
+                    self.progress.stop()
+                    self.scan_btn.configure(state="normal")
+                    self.browse_btn.configure(state="normal")
+                    elapsed = time.time() - (self.scan_started or time.time())
+                    status = "Scan cancelled" if cancelled else "Scan complete"
+                    self.status_var.set(
+                        f"{status}: {count:,} files · {folders:,} folders · {fmt_size(size)} · "
+                        f"{inaccessible:,} unreadable entries · {elapsed:.1f}s")
+                    self._refresh_overview()
+                    self._show_tab(self.current_tab)
+                    # Hash candidates in background, grouped by size to reduce unnecessary reads.
+                    threading.Thread(target=self._find_duplicates_worker, daemon=True).start()
+                elif event == "dupes_done":
+                    self.duplicates = data
+                    self.card_values["duplicates"].configure(text=f"{len(self.duplicates):,}")
+                    self.status_var.set(self.status_var.get().split(" · Duplicate check")[0] + f" · Duplicate check: {len(data)} files in duplicate groups")
+                    if self.current_tab == "Duplicates":
+                        self._show_tab("Duplicates")
+                elif event == "scan_error":
+                    self.scanning = False
+                    self.progress.stop()
+                    self.scan_btn.configure(state="normal")
+                    self.browse_btn.configure(state="normal")
+                    messagebox.showerror("Scan error", data)
+                    self.status_var.set("Scan stopped due to an error.")
+        except queue.Empty:
+            pass
+        self.root.after(120, self._poll_events)
+
+    def _find_duplicates_worker(self):
+        by_size = defaultdict(list)
+        for f in self.files:
+            if f["size"] > 0:
+                by_size[f["size"]].append(f)
+        candidates = [group for group in by_size.values() if len(group) > 1]
+        found = []
+        total_groups = len(candidates)
+        checked = 0
+        for group in candidates:
+            if self.cancel_event.is_set():
+                break
+            hashes = defaultdict(list)
+            for f in group:
+                try:
+                    digest = hashlib.sha256()
+                    with open(f["path"], "rb") as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            if self.cancel_event.is_set():
+                                break
+                            digest.update(chunk)
+                    f["hash"] = digest.hexdigest()
+                    hashes[f["hash"]].append(f)
+                except (OSError, PermissionError):
+                    continue
+            for digest, same in hashes.items():
+                if len(same) > 1:
+                    found.extend(same)
+            checked += 1
+            if checked % 20 == 0:
+                self.events.put(("dupe_progress", (checked, total_groups)))
+        self.events.put(("dupes_done", found))
+
+    def _files_view(self):
+        toolbar = tk.Frame(self.content, bg=PANEL)
+        toolbar.pack(fill="x", pady=(0, 10))
+        tk.Label(toolbar, text="Search", bg=PANEL, fg=MUTED).pack(side="left")
+        search = tk.Entry(toolbar, textvariable=self.search_var, bg=PANEL2, fg=TEXT,
+                          insertbackground=TEXT, relief="flat", width=25)
+        search.pack(side="left", padx=(8, 14), ipady=7)
+        tk.Label(toolbar, text="Type", bg=PANEL, fg=MUTED).pack(side="left")
+        types = ["All types"] + sorted({f["ext"] for f in self.files})
+        combo = ttk.Combobox(toolbar, textvariable=self.ext_var, values=types,
+                             state="readonly", width=18)
+        combo.pack(side="left", padx=(8, 14))
+        self._button(toolbar, "Apply filters", self._refresh_file_table, "#1d4ed8", "white").pack(side="left")
+        self._button(toolbar, "Export CSV", lambda: self._export_csv("files"), PANEL2, TEXT).pack(side="right")
+        tree = self._make_tree(self.content, [
+            ("name", "File name", 220), ("size", "Size", 100), ("ext", "Type", 120),
+            ("modified", "Modified", 135), ("path", "Full path", 560)
+        ], height=14)
+        tree._container.pack(fill="both", expand=True)
+        self.file_tree = tree
+        self._refresh_file_table()
+        search.bind("<Return>", lambda _e: self._refresh_file_table())
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_file_table())
+
+    def _refresh_file_table(self):
+        if not hasattr(self, "file_tree") or not self.file_tree.winfo_exists():
+            return
+        query = self.search_var.get().strip().lower()
+        ext = self.ext_var.get()
+        tree = self.file_tree
+        tree.delete(*tree.get_children())
+        records = sorted(self.files, key=lambda x: x["size"], reverse=True)
+        for f in records:
+            if query and query not in f["name"].lower() and query not in f["path"].lower():
+                continue
+            if ext != "All types" and f["ext"] != ext:
+                continue
+            tree.insert("", "end", values=(f["name"], fmt_size(f["size"]), f["ext"],
+                                           fmt_date(f["mtime"]), f["path"]))
+
+    def _duplicates_view(self):
+        tk.Label(self.content, text="Verified duplicates", bg=PANEL, fg=TEXT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(self.content, text="Files are grouped by matching size and SHA-256 hash. Review every path before deleting.",
+                 bg=PANEL, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(3, 10))
+        tree = self._make_tree(self.content, [
+            ("name", "File", 220), ("size", "Size", 100), ("hash", "SHA-256", 270),
+            ("path", "Full path", 580)
+        ], height=14)
+        tree._container.pack(fill="both", expand=True)
+        self.dupe_tree = tree
+        for f in self.duplicates:
+            tree.insert("", "end", values=(f["name"], fmt_size(f["size"]), f.get("hash") or "", f["path"]))
+        row = tk.Frame(self.content, bg=PANEL)
+        row.pack(fill="x", pady=(10, 0))
+        tk.Label(row, text=f"{len(self.duplicates):,} files in duplicate groups",
+                 bg=PANEL, fg=TEXT).pack(side="left")
+        self._button(row, "Export duplicates CSV", lambda: self._export_csv("duplicates"),
+                     PANEL2, TEXT).pack(side="right")
+
+    def _cleanup_view(self):
+        tk.Label(self.content, text="Cleanup Review", bg=PANEL, fg=TEXT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(self.content,
+                 text="Candidates are suggestions only: files larger than your chosen threshold. This tool does not decide whether a file is safe to remove.",
+                 bg=PANEL, fg=MUTED, justify="left", wraplength=1000,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 12))
+        row = tk.Frame(self.content, bg=PANEL)
+        row.pack(fill="x", pady=(0, 10))
+        tk.Label(row, text="Minimum size (MB):", bg=PANEL, fg=TEXT).pack(side="left")
+        tk.Entry(row, textvariable=self.min_size_var, width=9, bg=PANEL2, fg=TEXT,
+                 insertbackground=TEXT, relief="flat").pack(side="left", padx=8, ipady=6)
+        self._button(row, "Find candidates", self._refresh_cleanup, "#1d4ed8", "white").pack(side="left")
+        self._button(row, "Delete selected…", self._delete_selected_cleanup, "#7f1d1d", "#fecaca").pack(side="right")
+        tree = self._make_tree(self.content, [
+            ("name", "File", 230), ("size", "Size", 100), ("modified", "Modified", 140),
+            ("path", "Full path", 650)
+        ], height=13)
+        tree._container.pack(fill="both", expand=True)
+        self.cleanup_tree = tree
+        self._refresh_cleanup()
+
+    def _refresh_cleanup(self):
+        if not hasattr(self, "cleanup_tree") or not self.cleanup_tree.winfo_exists():
+            return
+        try:
+            threshold = max(0, float(self.min_size_var.get())) * 1024 * 1024
+        except ValueError:
+            messagebox.showerror("Invalid size", "Enter a valid minimum size in MB.")
+            return
+        tree = self.cleanup_tree
+        tree.delete(*tree.get_children())
+        candidates = [f for f in self.files if f["size"] >= threshold]
+        for f in sorted(candidates, key=lambda x: x["size"], reverse=True):
+            tree.insert("", "end", values=(f["name"], fmt_size(f["size"]),
+                                           fmt_date(f["mtime"]), f["path"]))
+        if not candidates:
+            self.status_var.set("No files meet this size threshold.")
+
+    def _delete_selected_cleanup(self):
+        tree = getattr(self, "cleanup_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return
+        selected = tree.selection()
+        if not selected:
+            messagebox.showinfo("Nothing selected", "Select the exact files you want to delete.")
+            return
+        paths = [tree.item(i, "values")[3] for i in selected]
+        preview = "\n".join(paths[:5])
+        if len(paths) > 5:
+            preview += f"\n… and {len(paths) - 5} more"
+        if not messagebox.askyesno(
+            "Confirm permanent deletion",
+            f"You are about to permanently delete {len(paths)} selected file(s):\n\n{preview}\n\n"
+            "This action cannot be undone. Ensure these files are not needed. Continue?"
+        ):
+            return
+        deleted, failed = 0, []
+        for path in paths:
+            try:
+                # Re-check file exists and is a regular non-symlink file.
+                if os.path.islink(path) or not os.path.isfile(path):
+                    raise OSError("Not a regular file or no longer exists")
+                os.remove(path)
+                deleted += 1
+                self.file_by_path.pop(path, None)
+            except OSError as exc:
+                failed.append(f"{path}: {exc}")
+        removed_paths = set(paths) - {x.split(": ", 1)[0] for x in failed}
+        self.files = [f for f in self.files if f["path"] not in removed_paths]
+        self.duplicates = [f for f in self.duplicates if f["path"] not in removed_paths]
+        self._refresh_overview()
+        self._show_tab("Cleanup Review")
+        message = f"Deleted {deleted} file(s)."
+        if failed:
+            message += f"\n{len(failed)} file(s) could not be deleted."
+        messagebox.showinfo("Cleanup result", message)
+
+    def _export_csv(self, kind):
+        if kind == "duplicates":
+            records = self.duplicates
+            default = "duplicate_files.csv"
+        else:
+            records = self.files
+            default = "storage_scan.csv"
+        if not records:
+            messagebox.showinfo("No data", "No records to export yet.")
+            return
+        path = filedialog.asksaveasfilename(title="Export scan results",
+                                            defaultextension=".csv",
+                                            initialfile=default,
+                                            filetypes=[("CSV files", "*.csv")])
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Name", "Full Path", "Size Bytes", "Size Human",
+                                 "Extension", "Modified", "SHA-256"])
+                for f in records:
+                    writer.writerow([f["name"], f["path"], f["size"], fmt_size(f["size"]),
+                                     f["ext"], fmt_date(f["mtime"]), f.get("hash") or ""])
+            messagebox.showinfo("Export complete", f"Exported {len(records):,} record(s) to:\n{path}")
+        except OSError as exc:
+            messagebox.showerror("Export failed", str(exc))
+
+
+def main():
+    root = tk.Tk()
+    app = StorageIntelligence(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
