@@ -1,0 +1,733 @@
+"""
+FOCUSFORGE — Day 06/100 Coding Challenge
+A Windows 10 compatible productivity command center.
+Python 3.10+ recommended. Standard library only (Tkinter + SQLite).
+"""
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog, filedialog
+import sqlite3
+import csv
+import os
+import sys
+import time
+from datetime import datetime, date, timedelta
+
+APP_NAME = "FOCUSFORGE"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "focusforge.db")
+
+BG = "#0b1020"
+PANEL = "#121a2e"
+PANEL2 = "#18233b"
+BORDER = "#263653"
+TEXT = "#eef4ff"
+MUTED = "#91a2c4"
+ACCENT = "#6c8cff"
+CYAN = "#52d8d8"
+GREEN = "#5ee0a0"
+ORANGE = "#ffb86b"
+RED = "#ff6b83"
+PURPLE = "#bd91ff"
+
+
+def now_stamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+class Database:
+    def __init__(self, path):
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS tasks(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'General',
+                priority TEXT NOT NULL DEFAULT 'Medium',
+                due_date TEXT,
+                status TEXT NOT NULL DEFAULT 'Pending',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sessions(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_title TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                completed_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS notes(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS goals(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                target INTEGER NOT NULL DEFAULT 5,
+                progress INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+        """)
+        self.conn.commit()
+
+    def query(self, sql, params=()):
+        return self.conn.execute(sql, params).fetchall()
+
+    def execute(self, sql, params=()):
+        cur = self.conn.execute(sql, params)
+        self.conn.commit()
+        return cur.lastrowid
+
+    def close(self):
+        self.conn.close()
+
+
+class FocusForge(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("FOCUSFORGE | Productivity Command Center")
+        self.geometry("1240x790")
+        self.minsize(1020, 680)
+        self.configure(bg=BG)
+        self.db = Database(DB_PATH)
+        self.timer_running = False
+        self.timer_remaining = 25 * 60
+        self.timer_after_id = None
+        self.timer_mode = "Focus"
+        self.timer_task = tk.StringVar(value="Deep work session")
+        self.task_search = tk.StringVar()
+        self.task_filter = tk.StringVar(value="All")
+        self._setup_style()
+        self._build_shell()
+        self.refresh_all()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _setup_style(self):
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("Treeview", background=PANEL, foreground=TEXT,
+                        fieldbackground=PANEL, rowheight=31, borderwidth=0,
+                        font=("Segoe UI", 10))
+        style.configure("Treeview.Heading", background=PANEL2, foreground=CYAN,
+                        font=("Segoe UI Semibold", 10), relief="flat")
+        style.map("Treeview", background=[("selected", "#293b67")],
+                  foreground=[("selected", TEXT)])
+        style.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2,
+                        foreground=TEXT, arrowcolor=TEXT)
+        style.map("TCombobox", fieldbackground=[("readonly", PANEL2)],
+                  foreground=[("readonly", TEXT)])
+
+    def _label(self, parent, text, size=10, color=TEXT, bold=False, **kwargs):
+        return tk.Label(parent, text=text, bg=kwargs.pop("bg", parent.cget("bg")),
+                        fg=color, font=("Segoe UI" + (" Semibold" if bold else ""), size),
+                        **kwargs)
+
+    def _button(self, parent, text, command, color=ACCENT, fg="white", **kwargs):
+        return tk.Button(parent, text=text, command=command, bg=color, fg=fg,
+                         activebackground=color, activeforeground=fg,
+                         relief="flat", bd=0, cursor="hand2",
+                         font=("Segoe UI Semibold", 10), padx=13, pady=8,
+                         **kwargs)
+
+    def _card(self, parent, padx=16, pady=14):
+        frame = tk.Frame(parent, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        frame.pack_propagate(False)
+        return frame
+
+    def _build_shell(self):
+        header = tk.Frame(self, bg=BG)
+        header.pack(fill="x", padx=24, pady=(18, 12))
+        brand = tk.Frame(header, bg=BG)
+        brand.pack(side="left")
+        self._label(brand, "◈  FOCUSFORGE", 20, CYAN, True).pack(anchor="w")
+        self._label(brand, "YOUR PERSONAL PRODUCTIVITY COMMAND CENTER", 8, MUTED, True).pack(anchor="w", pady=(2, 0))
+        right = tk.Frame(header, bg=BG)
+        right.pack(side="right")
+        self.clock_label = self._label(right, "", 11, TEXT, True)
+        self.clock_label.pack(anchor="e")
+        self._label(right, "DAY 06 / 100  •  BUILD IN PUBLIC", 9, MUTED).pack(anchor="e", pady=(4, 0))
+        self._tick_clock()
+
+        nav = tk.Frame(self, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        nav.pack(fill="x", padx=24, pady=(0, 14))
+        self.nav_buttons = {}
+        for key, label in [("Overview", "◫  Overview"), ("Tasks", "☷  Tasks"),
+                           ("Focus", "◷  Focus Room"), ("Notes", "▤  Notes"),
+                           ("Goals", "◎  Goals")]:
+            btn = tk.Button(nav, text=label, command=lambda k=key: self.show_page(k),
+                            bg=ACCENT if key == "Overview" else PANEL,
+                            fg="white" if key == "Overview" else MUTED,
+                            activebackground=ACCENT, activeforeground="white",
+                            relief="flat", bd=0, padx=18, pady=12,
+                            font=("Segoe UI Semibold", 10), cursor="hand2")
+            btn.pack(side="left", padx=3, pady=3)
+            self.nav_buttons[key] = btn
+
+        self.content = tk.Frame(self, bg=BG)
+        self.content.pack(fill="both", expand=True, padx=24, pady=(0, 16))
+        footer = tk.Frame(self, bg=BG)
+        footer.pack(fill="x", padx=24, pady=(0, 10))
+        self._label(footer, "LOCAL-FIRST • SQLITE STORAGE • NO ACCOUNT REQUIRED", 8, MUTED).pack(side="left")
+        self._label(footer, "FOCUS BETTER. BUILD CONSISTENTLY.", 8, CYAN, True).pack(side="right")
+        self.pages = {}
+        self._make_overview()
+        self._make_tasks()
+        self._make_focus()
+        self._make_notes()
+        self._make_goals()
+        self.show_page("Overview")
+
+    def _page_heading(self, parent, title, subtitle):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", pady=(2, 14))
+        self._label(top, title, 22, TEXT, True).pack(anchor="w")
+        self._label(top, subtitle, 10, MUTED).pack(anchor="w", pady=(3, 0))
+
+    def _make_overview(self):
+        page = tk.Frame(self.content, bg=BG)
+        self.pages["Overview"] = page
+        self._page_heading(page, "Good things happen when you focus.", "A clear view of your work, your time, and your momentum.")
+        stats = tk.Frame(page, bg=BG)
+        stats.pack(fill="x", pady=(0, 13))
+        self.stat_values = {}
+        for key, title, color in [
+            ("pending", "OPEN TASKS", ACCENT), ("done", "COMPLETED", GREEN),
+            ("focus", "FOCUS MINUTES", CYAN), ("overdue", "OVERDUE", RED)
+        ]:
+            box = tk.Frame(stats, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+            box.pack(side="left", fill="both", expand=True, padx=(0, 10))
+            self._label(box, title, 9, MUTED, True).pack(anchor="w", padx=15, pady=(13, 2))
+            val = self._label(box, "0", 25, color, True)
+            val.pack(anchor="w", padx=15, pady=(0, 12))
+            self.stat_values[key] = val
+        body = tk.Frame(page, bg=BG)
+        body.pack(fill="both", expand=True)
+        left = tk.Frame(body, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        self._label(left, "TODAY'S MISSION", 11, CYAN, True).pack(anchor="w", padx=16, pady=(15, 4))
+        self._label(left, "Small wins compound. Pick the next right task.", 9, MUTED).pack(anchor="w", padx=16, pady=(0, 10))
+        self.today_list = tk.Frame(left, bg=PANEL)
+        self.today_list.pack(fill="both", expand=True, padx=13, pady=(0, 10))
+        self._button(left, "+  Add a task", lambda: self.show_page("Tasks")).pack(anchor="w", padx=15, pady=(0, 15))
+        right = tk.Frame(body, bg=BG, width=310)
+        right.pack(side="right", fill="y")
+        right.pack_propagate(False)
+        focus = tk.Frame(right, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        focus.pack(fill="x", pady=(0, 12))
+        self._label(focus, "FOCUS ROOM", 10, PURPLE, True).pack(anchor="w", padx=15, pady=(14, 5))
+        self.overview_timer = self._label(focus, "25:00", 31, TEXT, True)
+        self.overview_timer.pack(anchor="w", padx=15)
+        self._label(focus, "One session. One task. No distractions.", 9, MUTED).pack(anchor="w", padx=15, pady=(2, 12))
+        self._button(focus, "Open Focus Room  →", lambda: self.show_page("Focus"), color="#57418c").pack(fill="x", padx=14, pady=(0, 14))
+        goals = tk.Frame(right, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        goals.pack(fill="both", expand=True)
+        self._label(goals, "GOAL MOMENTUM", 10, ORANGE, True).pack(anchor="w", padx=15, pady=(14, 8))
+        self.overview_goals = tk.Frame(goals, bg=PANEL)
+        self.overview_goals.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        self._button(goals, "Review goals  →", lambda: self.show_page("Goals"), color=PANEL2, fg=TEXT).pack(fill="x", padx=14, pady=(0, 14))
+
+    def _make_tasks(self):
+        page = tk.Frame(self.content, bg=BG)
+        self.pages["Tasks"] = page
+        self._page_heading(page, "Task Control", "Capture it. Prioritize it. Finish it.")
+        form = tk.Frame(page, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        form.pack(fill="x", pady=(0, 12))
+        self.task_title = tk.StringVar()
+        self.task_category = tk.StringVar(value="Coding")
+        self.task_priority = tk.StringVar(value="Medium")
+        self.task_due = tk.StringVar(value=date.today().isoformat())
+        row = tk.Frame(form, bg=PANEL)
+        row.pack(fill="x", padx=12, pady=12)
+        tk.Entry(row, textvariable=self.task_title, bg=PANEL2, fg=TEXT, insertbackground=TEXT,
+                 relief="flat", font=("Segoe UI", 10), width=27).pack(side="left", ipady=8, padx=(0, 8))
+        ttk.Combobox(row, textvariable=self.task_category, values=["Coding", "Study", "Personal", "Work", "Health", "General"],
+                     state="readonly", width=11).pack(side="left", padx=(0, 8), ipady=4)
+        ttk.Combobox(row, textvariable=self.task_priority, values=["Low", "Medium", "High"],
+                     state="readonly", width=9).pack(side="left", padx=(0, 8), ipady=4)
+        tk.Entry(row, textvariable=self.task_due, bg=PANEL2, fg=TEXT, insertbackground=TEXT,
+                 relief="flat", font=("Segoe UI", 10), width=12).pack(side="left", ipady=8, padx=(0, 8))
+        self._button(row, "＋ Add Task", self.add_task).pack(side="left")
+        self._label(form, "Task title • Category • Priority • Due date (YYYY-MM-DD)", 8, MUTED).pack(anchor="w", padx=14, pady=(0, 10))
+        controls = tk.Frame(page, bg=BG)
+        controls.pack(fill="x", pady=(0, 8))
+        tk.Entry(controls, textvariable=self.task_search, bg=PANEL, fg=TEXT, insertbackground=TEXT,
+                 relief="flat", font=("Segoe UI", 10), width=28).pack(side="left", ipady=7)
+        self.task_search.trace_add("write", lambda *_: self.refresh_tasks())
+        ttk.Combobox(controls, textvariable=self.task_filter, values=["All", "Pending", "Completed", "High priority", "Overdue"],
+                     state="readonly", width=15).pack(side="left", padx=8, ipady=3)
+        self.task_filter.trace_add("write", lambda *_: self.refresh_tasks())
+        self._button(controls, "✓ Complete", self.complete_task, color="#247c61").pack(side="left", padx=(0, 6))
+        self._button(controls, "Edit", self.edit_task, color=PANEL2, fg=TEXT).pack(side="left", padx=(0, 6))
+        self._button(controls, "Delete", self.delete_task, color="#85384a").pack(side="left")
+        self._button(controls, "Export CSV", self.export_tasks, color="#57418c").pack(side="right")
+        table_wrap = tk.Frame(page, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        table_wrap.pack(fill="both", expand=True)
+        cols = ("id", "title", "category", "priority", "due", "status")
+        self.task_tree = ttk.Treeview(table_wrap, columns=cols, show="headings", selectmode="browse")
+        headings = [("id", "ID", 45), ("title", "TASK", 360), ("category", "CATEGORY", 115),
+                    ("priority", "PRIORITY", 100), ("due", "DUE DATE", 120), ("status", "STATUS", 115)]
+        for col, label, width in headings:
+            self.task_tree.heading(col, text=label)
+            self.task_tree.column(col, width=width, anchor="w" if col == "title" else "center")
+        self.task_tree.tag_configure("High", foreground=RED)
+        self.task_tree.tag_configure("Completed", foreground=GREEN)
+        self.task_tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _make_focus(self):
+        page = tk.Frame(self.content, bg=BG)
+        self.pages["Focus"] = page
+        self._page_heading(page, "Focus Room", "A tiny commitment to your most important work.")
+        wrap = tk.Frame(page, bg=BG)
+        wrap.pack(fill="both", expand=True)
+        left = tk.Frame(wrap, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        self._label(left, "DEEP WORK TIMER", 11, CYAN, True).pack(pady=(26, 5))
+        self.timer_display = self._label(left, "25:00", 56, TEXT, True)
+        self.timer_display.pack(pady=(10, 3))
+        self.timer_status = self._label(left, "READY WHEN YOU ARE", 9, MUTED, True)
+        self.timer_status.pack(pady=(0, 18))
+        self.timer_canvas = tk.Canvas(left, width=300, height=14, bg=PANEL2, highlightthickness=0)
+        self.timer_canvas.pack(pady=(0, 20))
+        self.timer_canvas.create_rectangle(0, 0, 300, 14, fill=ACCENT, outline="", tags="progress")
+        self._label(left, "SESSION TASK", 9, MUTED, True).pack()
+        tk.Entry(left, textvariable=self.timer_task, bg=PANEL2, fg=TEXT, insertbackground=TEXT,
+                 relief="flat", justify="center", font=("Segoe UI", 11), width=35).pack(pady=(7, 15), ipady=8)
+        buttons = tk.Frame(left, bg=PANEL)
+        buttons.pack()
+        self._button(buttons, "▶ Start", self.start_timer).pack(side="left", padx=4)
+        self._button(buttons, "Ⅱ Pause", self.pause_timer, color=PANEL2, fg=TEXT).pack(side="left", padx=4)
+        self._button(buttons, "↻ Reset", self.reset_timer, color="#57418c").pack(side="left", padx=4)
+        modes = tk.Frame(left, bg=PANEL)
+        modes.pack(pady=18)
+        self._button(modes, "Focus 25m", lambda: self.set_timer_mode("Focus"), color="#293b67").pack(side="left", padx=4)
+        self._button(modes, "Short break 5m", lambda: self.set_timer_mode("Short break"), color="#24594f").pack(side="left", padx=4)
+        self._button(modes, "Long break 15m", lambda: self.set_timer_mode("Long break"), color="#57418c").pack(side="left", padx=4)
+        right = tk.Frame(wrap, bg=BG, width=300)
+        right.pack(side="right", fill="y")
+        right.pack_propagate(False)
+        info = tk.Frame(right, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        info.pack(fill="x", pady=(0, 12))
+        self._label(info, "THE FOCUS RULES", 10, PURPLE, True).pack(anchor="w", padx=15, pady=(15, 9))
+        for line in ["01  Pick one clear outcome", "02  Silence distractions", "03  Work until the timer ends", "04  Take a real break", "05  Repeat, don't overthink"]:
+            self._label(info, line, 9, TEXT).pack(anchor="w", padx=15, pady=6)
+        self._label(info, "Sessions are recorded when the timer finishes.", 8, MUTED, wraplength=250, justify="left").pack(anchor="w", padx=15, pady=(10, 15))
+        hist = tk.Frame(right, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        hist.pack(fill="both", expand=True)
+        self._label(hist, "RECENT SESSIONS", 10, CYAN, True).pack(anchor="w", padx=15, pady=(15, 8))
+        self.session_list = tk.Frame(hist, bg=PANEL)
+        self.session_list.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+
+    def _make_notes(self):
+        page = tk.Frame(self.content, bg=BG)
+        self.pages["Notes"] = page
+        self._page_heading(page, "Quick Notes", "Keep useful thoughts close without leaving your workflow.")
+        outer = tk.Frame(page, bg=BG)
+        outer.pack(fill="both", expand=True)
+        left = tk.Frame(outer, bg=PANEL, highlightbackground=BORDER, highlightthickness=1, width=300)
+        left.pack(side="left", fill="y", padx=(0, 12))
+        left.pack_propagate(False)
+        self._label(left, "YOUR NOTES", 10, CYAN, True).pack(anchor="w", padx=14, pady=(14, 8))
+        self.notes_list = tk.Listbox(left, bg=PANEL, fg=TEXT, selectbackground="#293b67",
+                                     relief="flat", font=("Segoe UI", 10), activestyle="none")
+        self.notes_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.notes_list.bind("<<ListboxSelect>>", self.load_note)
+        self._button(left, "+ New note", self.new_note).pack(fill="x", padx=10, pady=(0, 10))
+        right = tk.Frame(outer, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        right.pack(side="left", fill="both", expand=True)
+        self.note_title = tk.StringVar()
+        self._label(right, "NOTE TITLE", 9, MUTED, True).pack(anchor="w", padx=15, pady=(15, 5))
+        tk.Entry(right, textvariable=self.note_title, bg=PANEL2, fg=TEXT, insertbackground=TEXT,
+                 relief="flat", font=("Segoe UI", 12)).pack(fill="x", padx=15, ipady=8)
+        self._label(right, "CONTENT", 9, MUTED, True).pack(anchor="w", padx=15, pady=(12, 5))
+        self.note_body = tk.Text(right, bg=PANEL2, fg=TEXT, insertbackground=TEXT, relief="flat",
+                                 font=("Segoe UI", 11), wrap="word", padx=12, pady=12,
+                                 selectbackground="#293b67")
+        self.note_body.pack(fill="both", expand=True, padx=15, pady=(0, 12))
+        buttons = tk.Frame(right, bg=PANEL)
+        buttons.pack(fill="x", padx=15, pady=(0, 15))
+        self._button(buttons, "Save note", self.save_note).pack(side="left")
+        self._button(buttons, "Delete note", self.delete_note, color="#85384a").pack(side="left", padx=8)
+        self.current_note_id = None
+
+    def _make_goals(self):
+        page = tk.Frame(self.content, bg=BG)
+        self.pages["Goals"] = page
+        self._page_heading(page, "Goal Studio", "Turn big ambitions into small, measurable progress.")
+        form = tk.Frame(page, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        form.pack(fill="x", pady=(0, 13))
+        self.goal_title = tk.StringVar()
+        self.goal_target = tk.StringVar(value="10")
+        row = tk.Frame(form, bg=PANEL)
+        row.pack(fill="x", padx=14, pady=13)
+        tk.Entry(row, textvariable=self.goal_title, bg=PANEL2, fg=TEXT, insertbackground=TEXT,
+                 relief="flat", font=("Segoe UI", 10), width=35).pack(side="left", ipady=8, padx=(0, 8))
+        tk.Entry(row, textvariable=self.goal_target, bg=PANEL2, fg=TEXT, insertbackground=TEXT,
+                 relief="flat", font=("Segoe UI", 10), width=8).pack(side="left", ipady=8, padx=(0, 8))
+        self._button(row, "＋ Create Goal", self.add_goal).pack(side="left")
+        self._label(form, "Goal name • Target count (e.g. 10 projects, 30 study sessions)", 8, MUTED).pack(anchor="w", padx=15, pady=(0, 10))
+        self.goals_container = tk.Frame(page, bg=BG)
+        self.goals_container.pack(fill="both", expand=True)
+
+    def show_page(self, name):
+        for page in self.pages.values():
+            page.pack_forget()
+        self.pages[name].pack(fill="both", expand=True)
+        for key, btn in self.nav_buttons.items():
+            active = key == name
+            btn.configure(bg=ACCENT if active else PANEL, fg="white" if active else MUTED)
+        if name == "Tasks":
+            self.refresh_tasks()
+        elif name == "Notes":
+            self.refresh_notes()
+        elif name == "Goals":
+            self.refresh_goals()
+        elif name == "Focus":
+            self.refresh_sessions()
+        elif name == "Overview":
+            self.refresh_all()
+
+    def _tick_clock(self):
+        self.clock_label.configure(text=datetime.now().strftime("%A, %d %b  •  %I:%M:%S %p"))
+        self.after(1000, self._tick_clock)
+
+    def refresh_all(self):
+        tasks = self.db.query("SELECT * FROM tasks")
+        pending = sum(1 for t in tasks if t["status"] == "Pending")
+        done = sum(1 for t in tasks if t["status"] == "Completed")
+        overdue = sum(1 for t in tasks if t["status"] == "Pending" and t["due_date"] and t["due_date"] < date.today().isoformat())
+        focus = self.db.query("SELECT COALESCE(SUM(duration_minutes),0) AS total FROM sessions")[0]["total"]
+        for key, value in [("pending", pending), ("done", done), ("focus", focus), ("overdue", overdue)]:
+            self.stat_values[key].configure(text=str(value))
+        for child in self.today_list.winfo_children():
+            child.destroy()
+        today_tasks = self.db.query("""SELECT * FROM tasks WHERE status='Pending'
+            ORDER BY CASE priority WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END, due_date LIMIT 6""")
+        if not today_tasks:
+            self._label(self.today_list, "You're clear. Add a task to start building momentum.", 10, MUTED, wraplength=500, justify="left").pack(anchor="w", pady=12)
+        for task in today_tasks:
+            row = tk.Frame(self.today_list, bg=PANEL2)
+            row.pack(fill="x", pady=4)
+            color = RED if task["priority"] == "High" else ORANGE if task["priority"] == "Medium" else GREEN
+            self._label(row, "●", 10, color, True).pack(side="left", padx=(10, 7), pady=10)
+            self._label(row, task["title"], 10, TEXT, True).pack(side="left", fill="x", expand=True, pady=10)
+            self._label(row, task["due_date"] or "No due date", 8, MUTED).pack(side="right", padx=10)
+        for child in self.overview_goals.winfo_children():
+            child.destroy()
+        goals = self.db.query("SELECT * FROM goals ORDER BY id DESC LIMIT 4")
+        if not goals:
+            self._label(self.overview_goals, "No goals yet. Create one small target.", 9, MUTED, wraplength=250).pack(anchor="w", pady=8)
+        for g in goals:
+            self._label(self.overview_goals, g["title"], 9, TEXT, True).pack(anchor="w", pady=(5, 2))
+            pct = min(100, int(g["progress"] / max(1, g["target"]) * 100))
+            self._label(self.overview_goals, f'{g["progress"]}/{g["target"]}  •  {pct}%', 8, MUTED).pack(anchor="w")
+        self.overview_timer.configure(text=self._format_time(self.timer_remaining))
+        self.refresh_sessions()
+
+    def refresh_tasks(self):
+        if not hasattr(self, "task_tree"):
+            return
+        for item in self.task_tree.get_children():
+            self.task_tree.delete(item)
+        search = self.task_search.get().strip().lower()
+        filt = self.task_filter.get()
+        tasks = self.db.query("SELECT * FROM tasks ORDER BY CASE status WHEN 'Pending' THEN 0 ELSE 1 END, due_date, id DESC")
+        for t in tasks:
+            is_overdue = t["status"] == "Pending" and t["due_date"] and t["due_date"] < date.today().isoformat()
+            if search and search not in t["title"].lower() and search not in t["category"].lower():
+                continue
+            if filt == "Pending" and t["status"] != "Pending": continue
+            if filt == "Completed" and t["status"] != "Completed": continue
+            if filt == "High priority" and t["priority"] != "High": continue
+            if filt == "Overdue" and not is_overdue: continue
+            tag = "Completed" if t["status"] == "Completed" else t["priority"]
+            self.task_tree.insert("", "end", values=(t["id"], t["title"], t["category"], t["priority"],
+                                                      t["due_date"] or "—", "OVERDUE" if is_overdue else t["status"]), tags=(tag,))
+
+    def selected_task(self):
+        sel = self.task_tree.selection()
+        if not sel:
+            messagebox.showinfo("Select a task", "Please select a task from the table first.")
+            return None
+        return self.task_tree.item(sel[0])["values"]
+
+    def add_task(self):
+        title = self.task_title.get().strip()
+        due = self.task_due.get().strip()
+        if not title:
+            messagebox.showwarning("Missing title", "Enter a task title before adding it.")
+            return
+        if due:
+            try: datetime.strptime(due, "%Y-%m-%d")
+            except ValueError:
+                messagebox.showwarning("Invalid date", "Use YYYY-MM-DD format, for example 2026-10-25.")
+                return
+        try:
+            self.db.execute("INSERT INTO tasks(title,category,priority,due_date,status,created_at) VALUES(?,?,?,?,?,?)",
+                            (title, self.task_category.get(), self.task_priority.get(), due or None, "Pending", now_stamp()))
+            self.task_title.set("")
+            self.refresh_tasks()
+            self.refresh_all()
+        except sqlite3.Error as e:
+            messagebox.showerror("Database error", f"Could not save task.\n\n{e}")
+
+    def complete_task(self):
+        row = self.selected_task()
+        if not row: return
+        try:
+            self.db.execute("UPDATE tasks SET status=? WHERE id=?", ("Completed", row[0]))
+            self.refresh_tasks(); self.refresh_all()
+        except sqlite3.Error as e: messagebox.showerror("Database error", str(e))
+
+    def edit_task(self):
+        row = self.selected_task()
+        if not row: return
+        task_id = row[0]
+        record = self.db.query("SELECT * FROM tasks WHERE id=?", (task_id,))
+        if not record: return
+        r = record[0]
+        title = simpledialog.askstring("Edit task", "Task title:", initialvalue=r["title"], parent=self)
+        if title is None: return
+        title = title.strip()
+        if not title:
+            messagebox.showwarning("Invalid title", "Task title cannot be empty."); return
+        due = simpledialog.askstring("Edit due date", "Due date (YYYY-MM-DD) or leave blank:", initialvalue=r["due_date"] or "", parent=self)
+        if due is None: return
+        due = due.strip()
+        if due:
+            try: datetime.strptime(due, "%Y-%m-%d")
+            except ValueError:
+                messagebox.showwarning("Invalid date", "Use YYYY-MM-DD format."); return
+        self.db.execute("UPDATE tasks SET title=?, due_date=? WHERE id=?", (title, due or None, task_id))
+        self.refresh_tasks(); self.refresh_all()
+
+    def delete_task(self):
+        row = self.selected_task()
+        if not row: return
+        if messagebox.askyesno("Delete task", f'Delete "{row[1]}" permanently?'):
+            self.db.execute("DELETE FROM tasks WHERE id=?", (row[0],))
+            self.refresh_tasks(); self.refresh_all()
+
+    def export_tasks(self):
+        path = filedialog.asksaveasfilename(parent=self, title="Export tasks", defaultextension=".csv",
+                                            filetypes=[("CSV files", "*.csv")], initialfile="focusforge_tasks.csv")
+        if not path: return
+        try:
+            tasks = self.db.query("SELECT id,title,category,priority,due_date,status,created_at FROM tasks ORDER BY id")
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(["ID", "Title", "Category", "Priority", "Due Date", "Status", "Created At"])
+                writer.writerows([tuple(t) for t in tasks])
+            messagebox.showinfo("Export complete", f"Exported {len(tasks)} tasks to:\n{path}")
+        except OSError as e: messagebox.showerror("Export failed", str(e))
+
+    def _format_time(self, seconds):
+        seconds = max(0, int(seconds))
+        return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+    def set_timer_mode(self, mode):
+        self.pause_timer()
+        self.timer_mode = mode
+        self.timer_remaining = {"Focus": 25 * 60, "Short break": 5 * 60, "Long break": 15 * 60}[mode]
+        self._update_timer_ui()
+        self.timer_status.configure(text=f"{mode.upper()} • READY")
+
+    def start_timer(self):
+        if self.timer_running: return
+        if not self.timer_task.get().strip():
+            messagebox.showwarning("Name your session", "Enter a task name for this focus session.")
+            return
+        self.timer_running = True
+        self.timer_status.configure(text=f"{self.timer_mode.upper()} • IN PROGRESS", fg=GREEN)
+        self._timer_tick()
+
+    def _timer_tick(self):
+        if not self.timer_running: return
+        if self.timer_remaining <= 0:
+            self.timer_running = False
+            if self.timer_after_id:
+                self.after_cancel(self.timer_after_id); self.timer_after_id = None
+            if self.timer_mode == "Focus":
+                self.db.execute("INSERT INTO sessions(task_title,duration_minutes,completed_at) VALUES(?,?,?)",
+                                (self.timer_task.get().strip(), 25, now_stamp()))
+            self.timer_status.configure(text="SESSION COMPLETE • NICE WORK", fg=GREEN)
+            self.refresh_all()
+            messagebox.showinfo("Timer complete", f"{self.timer_mode} session complete. Take a breath!")
+            self._update_timer_ui()
+            return
+        self._update_timer_ui()
+        self.timer_remaining -= 1
+        self.timer_after_id = self.after(1000, self._timer_tick)
+
+    def pause_timer(self):
+        self.timer_running = False
+        if self.timer_after_id:
+            try: self.after_cancel(self.timer_after_id)
+            except tk.TclError: pass
+            self.timer_after_id = None
+        if hasattr(self, "timer_status"):
+            self.timer_status.configure(text="PAUSED" if self.timer_remaining < {"Focus":1500,"Short break":300,"Long break":900}[self.timer_mode] else "READY WHEN YOU ARE",
+                                        fg=MUTED)
+        self._update_timer_ui()
+
+    def reset_timer(self):
+        self.pause_timer()
+        self.timer_remaining = {"Focus": 25 * 60, "Short break": 5 * 60, "Long break": 15 * 60}[self.timer_mode]
+        self._update_timer_ui()
+
+    def _update_timer_ui(self):
+        value = self._format_time(self.timer_remaining)
+        if hasattr(self, "timer_display"): self.timer_display.configure(text=value)
+        if hasattr(self, "overview_timer"): self.overview_timer.configure(text=value)
+        if hasattr(self, "timer_canvas"):
+            total = {"Focus": 1500, "Short break": 300, "Long break": 900}[self.timer_mode]
+            width = 300 * (self.timer_remaining / total)
+            self.timer_canvas.coords("progress", 0, 0, width, 14)
+
+    def refresh_sessions(self):
+        if not hasattr(self, "session_list"): return
+        for child in self.session_list.winfo_children(): child.destroy()
+        sessions = self.db.query("SELECT * FROM sessions ORDER BY id DESC LIMIT 5")
+        if not sessions:
+            self._label(self.session_list, "No completed focus sessions yet.", 9, MUTED, wraplength=240).pack(anchor="w", pady=5)
+        for s in sessions:
+            self._label(self.session_list, s["task_title"], 9, TEXT, True, wraplength=240, justify="left").pack(anchor="w", pady=(5, 1))
+            self._label(self.session_list, f'{s["duration_minutes"]} min • {s["completed_at"][:16]}', 8, MUTED).pack(anchor="w", pady=(0, 3))
+
+    def refresh_notes(self):
+        self.notes_cache = self.db.query("SELECT * FROM notes ORDER BY updated_at DESC")
+        self.notes_list.delete(0, "end")
+        for n in self.notes_cache:
+            self.notes_list.insert("end", n["title"])
+        if self.current_note_id and hasattr(self, "notes_cache"):
+            for i, n in enumerate(self.notes_cache):
+                if n["id"] == self.current_note_id:
+                    self.notes_list.selection_set(i); break
+
+    def load_note(self, _event=None):
+        sel = self.notes_list.curselection()
+        if not sel: return
+        n = self.notes_cache[sel[0]]
+        self.current_note_id = n["id"]
+        self.note_title.set(n["title"])
+        self.note_body.delete("1.0", "end")
+        self.note_body.insert("1.0", n["body"])
+
+    def new_note(self):
+        self.current_note_id = None
+        self.note_title.set("")
+        self.note_body.delete("1.0", "end")
+        self.note_title_entry_focus()
+
+    def note_title_entry_focus(self):
+        # Focus the note body for quick writing; title can be entered above.
+        self.note_body.focus_set()
+
+    def save_note(self):
+        title = self.note_title.get().strip()
+        body = self.note_body.get("1.0", "end-1c").strip()
+        if not title:
+            messagebox.showwarning("Title required", "Give your note a title before saving."); return
+        if not body:
+            messagebox.showwarning("Empty note", "Write a little content before saving."); return
+        try:
+            if self.current_note_id:
+                self.db.execute("UPDATE notes SET title=?,body=?,updated_at=? WHERE id=?",
+                                (title, body, now_stamp(), self.current_note_id))
+            else:
+                self.current_note_id = self.db.execute("INSERT INTO notes(title,body,updated_at) VALUES(?,?,?)",
+                                                       (title, body, now_stamp()))
+            self.refresh_notes()
+            messagebox.showinfo("Saved", "Your note has been saved locally.")
+        except sqlite3.Error as e: messagebox.showerror("Save failed", str(e))
+
+    def delete_note(self):
+        if not self.current_note_id:
+            messagebox.showinfo("Select a note", "Select a saved note to delete."); return
+        if messagebox.askyesno("Delete note", "Delete this note permanently?"):
+            self.db.execute("DELETE FROM notes WHERE id=?", (self.current_note_id,))
+            self.current_note_id = None
+            self.note_title.set("")
+            self.note_body.delete("1.0", "end")
+            self.refresh_notes()
+
+    def add_goal(self):
+        title = self.goal_title.get().strip()
+        try: target = int(self.goal_target.get())
+        except ValueError:
+            messagebox.showwarning("Invalid target", "Target must be a whole number, such as 10."); return
+        if not title:
+            messagebox.showwarning("Goal required", "Enter a name for your goal."); return
+        if target < 1 or target > 100000:
+            messagebox.showwarning("Invalid target", "Target must be between 1 and 100000."); return
+        try:
+            self.db.execute("INSERT INTO goals(title,target,progress,created_at) VALUES(?,?,0,?)",
+                            (title, target, now_stamp()))
+            self.goal_title.set("")
+            self.refresh_goals(); self.refresh_all()
+        except sqlite3.Error as e: messagebox.showerror("Save failed", str(e))
+
+    def refresh_goals(self):
+        for child in self.goals_container.winfo_children(): child.destroy()
+        goals = self.db.query("SELECT * FROM goals ORDER BY id DESC")
+        if not goals:
+            self._label(self.goals_container, "No goals yet — create your first measurable target above.", 11, MUTED).pack(anchor="w", pady=18)
+        for g in goals:
+            card = tk.Frame(self.goals_container, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+            card.pack(fill="x", pady=6)
+            top = tk.Frame(card, bg=PANEL)
+            top.pack(fill="x", padx=15, pady=(12, 7))
+            self._label(top, g["title"], 12, TEXT, True).pack(side="left")
+            pct = min(100, int(g["progress"] / max(1, g["target"]) * 100))
+            self._label(top, f'{g["progress"]}/{g["target"]}  •  {pct}%', 10, CYAN, True).pack(side="right")
+            canvas = tk.Canvas(card, height=8, bg=PANEL2, highlightthickness=0)
+            canvas.pack(fill="x", padx=15, pady=(0, 10))
+            canvas.update_idletasks()
+            width = max(1, canvas.winfo_width())
+            canvas.create_rectangle(0, 0, width * pct / 100, 8, fill=GREEN if pct == 100 else ACCENT, outline="")
+            controls = tk.Frame(card, bg=PANEL)
+            controls.pack(fill="x", padx=15, pady=(0, 12))
+            self._button(controls, "+1 progress", lambda gid=g["id"]: self.bump_goal(gid, 1), color="#247c61").pack(side="left")
+            self._button(controls, "−1", lambda gid=g["id"]: self.bump_goal(gid, -1), color=PANEL2, fg=TEXT).pack(side="left", padx=6)
+            self._button(controls, "Delete", lambda gid=g["id"]: self.remove_goal(gid), color="#85384a").pack(side="right")
+
+    def bump_goal(self, goal_id, delta):
+        g = self.db.query("SELECT * FROM goals WHERE id=?", (goal_id,))
+        if not g: return
+        progress = max(0, min(g[0]["target"], g[0]["progress"] + delta))
+        self.db.execute("UPDATE goals SET progress=? WHERE id=?", (progress, goal_id))
+        self.refresh_goals(); self.refresh_all()
+
+    def remove_goal(self, goal_id):
+        if messagebox.askyesno("Delete goal", "Delete this goal and its progress?"):
+            self.db.execute("DELETE FROM goals WHERE id=?", (goal_id,))
+            self.refresh_goals(); self.refresh_all()
+
+    def on_close(self):
+        if self.timer_running:
+            if not messagebox.askyesno("Timer running", "The focus timer is running. Close the app anyway?"):
+                return
+        try:
+            if self.timer_after_id: self.after_cancel(self.timer_after_id)
+            self.db.close()
+        except Exception:
+            pass
+        self.destroy()
+
+
+def main():
+    try:
+        app = FocusForge()
+        app.mainloop()
+    except sqlite3.Error as exc:
+        messagebox.showerror("Database startup error", f"FocusForge could not open its local database.\n\n{exc}\n\nTry running it from a folder where you have write permission.")
+    except tk.TclError as exc:
+        print("Tkinter GUI error:", exc, file=sys.stderr)
+        print("Make sure Python was installed with Tcl/Tk support.", file=sys.stderr)
+        raise
+
+
+if __name__ == "__main__":
+    main()
