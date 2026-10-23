@@ -1,0 +1,387 @@
+import os
+import platform
+import socket
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from datetime import datetime
+import sys
+import subprocess
+
+try:
+    import psutil
+except ImportError:
+    print("Installing required package: psutil...")
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "psutil"
+    ])
+    import psutil
+except ImportError:
+    psutil = None
+
+BG = "#0b1220"
+PANEL = "#111c2f"
+BORDER = "#263852"
+TEXT = "#e8eef8"
+MUTED = "#91a4bf"
+BLUE = "#4f8cff"
+GREEN = "#27d7a0"
+ORANGE = "#ffb454"
+RED = "#ff5d73"
+PURPLE = "#a78bfa"
+
+
+def human_bytes(number):
+    number = float(number)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if number < 1024 or unit == "TB":
+            return f"{number:.1f} {unit}"
+        number /= 1024
+    return f"{number:.1f} TB"
+
+
+def uptime_text(boot_time):
+    seconds = max(0, int(time.time() - boot_time))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, _ = divmod(seconds, 60)
+    return f"{days}d {hours}h {minutes}m" if days else f"{hours}h {minutes}m"
+
+
+class HealthMonitor:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("System Health Monitor | Day 08/100")
+        self.root.geometry("1120x760")
+        self.root.minsize(900, 620)
+        self.root.configure(bg=BG)
+        self.running = True
+        self.auto_refresh = tk.BooleanVar(value=True)
+        self.alerts = tk.BooleanVar(value=True)
+        self.last_alert = {}
+        self.last_net = psutil.net_io_counters() if psutil else None
+        self.last_net_time = time.monotonic()
+        self.cards = {}
+        self.details = {}
+        self.info = {}
+
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Horizontal.TProgressbar", troughcolor="#263852",
+                        background=BLUE, thickness=8, bordercolor="#263852")
+        style.configure("Treeview", background=PANEL, foreground=TEXT,
+                        fieldbackground=PANEL, rowheight=26, borderwidth=0)
+        style.configure("Treeview.Heading", background="#16243a", foreground=TEXT)
+
+        self.build_ui()
+        self.load_static_info()
+        if psutil:
+            psutil.cpu_percent(interval=None)
+            self.root.after(600, self.refresh)
+        else:
+            self.log("psutil is missing. Install it using: python -m pip install psutil")
+            messagebox.showwarning(
+                "Dependency required",
+                "Install the free psutil package first:\n\npython -m pip install psutil\n\nThen restart this app."
+            )
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+    def build_ui(self):
+        header = tk.Frame(self.root, bg=BG)
+        header.pack(fill="x", padx=22, pady=(18, 14))
+        tk.Label(header, text="SYSTEM HEALTH", bg=BG, fg=TEXT,
+                 font=("Segoe UI", 22, "bold")).pack(anchor="w")
+        tk.Label(header, text="Live PC performance • Local monitoring • No cloud required",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 0))
+        self.clock = tk.Label(header, text="--:--:--", bg=BG, fg=GREEN,
+                              font=("Consolas", 12, "bold"))
+        self.clock.pack(anchor="e")
+
+        cards_frame = tk.Frame(self.root, bg=BG)
+        cards_frame.pack(fill="x", padx=22, pady=(0, 14))
+        for key, title, color in [
+            ("cpu", "CPU USAGE", BLUE), ("ram", "MEMORY USAGE", PURPLE),
+            ("disk", "SYSTEM DRIVE", GREEN), ("battery", "BATTERY", ORANGE)
+        ]:
+            card = tk.Frame(cards_frame, bg=PANEL,
+                            highlightbackground=BORDER, highlightthickness=1)
+            card.pack(side="left", fill="both", expand=True, padx=(0, 9))
+            inside = tk.Frame(card, bg=PANEL)
+            inside.pack(fill="both", expand=True, padx=14, pady=13)
+            tk.Label(inside, text=title, bg=PANEL, fg=MUTED,
+                     font=("Segoe UI", 9, "bold")).pack(anchor="w")
+            value = tk.Label(inside, text="--", bg=PANEL, fg=color,
+                             font=("Segoe UI", 24, "bold"))
+            value.pack(anchor="w", pady=(7, 7))
+            bar = ttk.Progressbar(inside, maximum=100, mode="determinate")
+            bar.pack(fill="x")
+            detail = tk.Label(inside, text="Waiting for data", bg=PANEL, fg=MUTED,
+                              font=("Segoe UI", 8))
+            detail.pack(anchor="w", pady=(7, 0))
+            self.cards[key] = (value, bar, detail, color)
+
+        body = tk.Frame(self.root, bg=BG)
+        body.pack(fill="both", expand=True, padx=22, pady=(0, 12))
+        body.columnconfigure(0, weight=3)
+        body.columnconfigure(1, weight=2)
+        body.rowconfigure(0, weight=1)
+
+        left = self.panel(body, "PERFORMANCE & ACTIVITY")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        metrics = tk.Frame(left, bg=PANEL)
+        metrics.pack(fill="x", padx=15, pady=(0, 10))
+        for key, label in [
+            ("cpu_detail", "Processor"), ("ram_detail", "Memory"),
+            ("disk_detail", "Disk I/O"), ("network_detail", "Network")
+        ]:
+            row = tk.Frame(metrics, bg=PANEL)
+            row.pack(fill="x", pady=7)
+            tk.Label(row, text=label, width=12, anchor="w", bg=PANEL, fg=MUTED,
+                     font=("Segoe UI", 9)).pack(side="left")
+            val = tk.Label(row, text="Collecting...", anchor="w", bg=PANEL, fg=TEXT,
+                           font=("Segoe UI", 9, "bold"))
+            val.pack(side="left", fill="x", expand=True)
+            self.details[key] = val
+        tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=15, pady=7)
+        tk.Label(left, text="SYSTEM EVENTS", bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15)
+        logframe = tk.Frame(left, bg=PANEL)
+        logframe.pack(fill="both", expand=True, padx=15, pady=(7, 13))
+        self.logbox = tk.Text(logframe, bg="#0c1627", fg="#c8d6e8",
+                              insertbackground=TEXT, relief="flat", bd=0,
+                              wrap="word", font=("Consolas", 9), height=8,
+                              state="disabled")
+        self.logbox.pack(side="left", fill="both", expand=True)
+        scroll = ttk.Scrollbar(logframe, command=self.logbox.yview)
+        scroll.pack(side="right", fill="y")
+        self.logbox.configure(yscrollcommand=scroll.set)
+
+        right = self.panel(body, "DEVICE INFORMATION")
+        right.grid(row=0, column=1, sticky="nsew")
+        infobox = tk.Frame(right, bg=PANEL)
+        infobox.pack(fill="x", padx=15, pady=(0, 12))
+        for key, label in [
+            ("computer", "Computer"), ("os", "Operating system"),
+            ("version", "OS version"), ("processor", "Processor"),
+            ("cores", "CPU cores"), ("uptime", "Uptime"),
+            ("boot", "Last boot"), ("disk_space", "Disk space")
+        ]:
+            row = tk.Frame(infobox, bg=PANEL)
+            row.pack(fill="x", pady=5)
+            tk.Label(row, text=label, bg=PANEL, fg=MUTED, width=14, anchor="w",
+                     font=("Segoe UI", 8)).pack(side="left")
+            val = tk.Label(row, text="—", bg=PANEL, fg=TEXT, anchor="e",
+                           justify="right", wraplength=170, font=("Segoe UI", 8, "bold"))
+            val.pack(side="right", fill="x", expand=True)
+            self.info[key] = val
+        tk.Frame(right, bg=BORDER, height=1).pack(fill="x", padx=15, pady=7)
+        tk.Label(right, text="MONITOR CONTROLS", bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(0, 7))
+        controls = tk.Frame(right, bg=PANEL)
+        controls.pack(fill="x", padx=15, pady=(0, 13))
+        for label, var in [("Auto refresh every 2 seconds", self.auto_refresh),
+                           ("Show high-usage alerts", self.alerts)]:
+            tk.Checkbutton(controls, text=label, variable=var, bg=PANEL, fg=TEXT,
+                           selectcolor="#203653", activebackground=PANEL,
+                           activeforeground=TEXT, font=("Segoe UI", 9),
+                           relief="flat").pack(anchor="w", pady=2)
+        buttons = tk.Frame(controls, bg=PANEL)
+        buttons.pack(fill="x", pady=(9, 0))
+        tk.Button(buttons, text="REFRESH NOW", command=self.manual_refresh,
+                  bg=BLUE, fg="white", activebackground="#3675df",
+                  relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+                  padx=10, pady=9, cursor="hand2").pack(side="left", fill="x", expand=True, padx=(0, 5))
+        tk.Button(buttons, text="SAVE REPORT", command=self.save_report,
+                  bg="#203653", fg=TEXT, activebackground="#2b4567",
+                  relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+                  padx=10, pady=9, cursor="hand2").pack(side="left", fill="x", expand=True)
+
+        footer = tk.Frame(self.root, bg=BG)
+        footer.pack(fill="x", padx=22, pady=(0, 10))
+        tk.Label(footer, text="DAY 08 / 100  •  PYTHON + TKINTER + PSUTIL",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8, "bold")).pack(side="left")
+        self.footer_status = tk.Label(footer, text="Ready", bg=BG, fg=GREEN,
+                                      font=("Segoe UI", 8))
+        self.footer_status.pack(side="right")
+
+    @staticmethod
+    def panel(parent, title):
+        frame = tk.Frame(parent, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        tk.Label(frame, text=title, bg=PANEL, fg=TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=15, pady=(13, 12))
+        return frame
+
+    def load_static_info(self):
+        self.info["computer"].configure(text=socket.gethostname())
+        self.info["os"].configure(text=f"{platform.system()} {platform.release()}")
+        self.info["version"].configure(text=platform.version())
+        self.info["processor"].configure(text=platform.processor() or "Not reported")
+        if psutil:
+            self.info["cores"].configure(
+                text=f"{psutil.cpu_count(logical=False) or '?'} physical / {psutil.cpu_count() or '?'} logical"
+            )
+            try:
+                self.info["boot"].configure(
+                    text=datetime.fromtimestamp(psutil.boot_time()).strftime("%d %b %Y, %H:%M")
+                )
+            except (OSError, ValueError):
+                self.info["boot"].configure(text="Unavailable")
+
+    def log(self, message):
+        if not hasattr(self, "logbox"):
+            return
+        self.logbox.configure(state="normal")
+        self.logbox.insert("end", f"[{datetime.now():%H:%M:%S}]  {message}\n")
+        self.logbox.see("end")
+        if int(self.logbox.index("end-1c").split(".")[0]) > 200:
+            self.logbox.delete("1.0", "40.0")
+        self.logbox.configure(state="disabled")
+
+    def set_card(self, key, value, percent, detail, color=None):
+        label, bar, detail_label, default_color = self.cards[key]
+        label.configure(text=value, fg=color or default_color)
+        bar["value"] = max(0, min(100, percent))
+        detail_label.configure(text=detail)
+
+    def maybe_alert(self, name, value):
+        if not self.alerts.get() or value < 90:
+            return
+        now = time.monotonic()
+        if now - self.last_alert.get(name, 0) > 60:
+            self.last_alert[name] = now
+            self.log(f"WARNING: {name} usage is high ({value:.0f}%).")
+
+    def refresh(self):
+        if not self.running:
+            return
+        self.clock.configure(text=datetime.now().strftime("%H:%M:%S"))
+        if psutil:
+            try:
+                self.update_metrics()
+            except Exception as exc:
+                self.footer_status.configure(text=f"Read error: {exc}", fg=RED)
+                self.log(f"Could not read metrics: {exc}")
+        if self.auto_refresh.get() and self.running:
+            self.root.after(2000, self.refresh)
+
+    def manual_refresh(self):
+        if not psutil:
+            messagebox.showerror("Missing package", "Run: python -m pip install psutil")
+            return
+        try:
+            self.update_metrics()
+            self.footer_status.configure(text="Refreshed just now", fg=GREEN)
+        except Exception as exc:
+            messagebox.showerror("Refresh failed", str(exc))
+
+    def update_metrics(self):
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory()
+        drive_path = os.environ.get("SystemDrive", "C:") + "\\"
+        try:
+            disk = psutil.disk_usage(drive_path)
+        except (OSError, PermissionError):
+            disk = psutil.disk_usage(os.path.abspath(os.sep))
+
+        self.set_card("cpu", f"{cpu:.0f}%", cpu, f"{psutil.cpu_count() or '?'} logical cores")
+        self.set_card("ram", f"{mem.percent:.0f}%", mem.percent,
+                      f"{human_bytes(mem.used)} used of {human_bytes(mem.total)}", PURPLE)
+        self.set_card("disk", f"{disk.percent:.0f}%", disk.percent,
+                      f"{human_bytes(disk.free)} free of {human_bytes(disk.total)}", GREEN)
+
+        try:
+            battery = psutil.sensors_battery()
+        except (AttributeError, OSError):
+            battery = None
+        if battery is None:
+            self.set_card("battery", "N/A", 0, "No battery detected", ORANGE)
+        else:
+            bcolor = GREEN if battery.percent > 25 else ORANGE if battery.percent > 10 else RED
+            state = "Plugged in" if battery.power_plugged else "On battery"
+            self.set_card("battery", f"{battery.percent:.0f}%", battery.percent, state, bcolor)
+
+        self.details["cpu_detail"].configure(
+            text=f"{cpu:.1f}% utilization • {psutil.cpu_count() or '?'} logical cores")
+        self.details["ram_detail"].configure(
+            text=f"{human_bytes(mem.used)} used • {human_bytes(mem.available)} available")
+
+        try:
+            io = psutil.disk_io_counters()
+            if io:
+                self.details["disk_detail"].configure(
+                    text=f"Read {human_bytes(io.read_bytes)} • Written {human_bytes(io.write_bytes)}")
+            net = psutil.net_io_counters()
+            now = time.monotonic()
+            if self.last_net is not None:
+                elapsed = max(now - self.last_net_time, 0.001)
+                down = max(0, net.bytes_recv - self.last_net.bytes_recv) / elapsed
+                up = max(0, net.bytes_sent - self.last_net.bytes_sent) / elapsed
+                self.details["network_detail"].configure(
+                    text=f"↓ {human_bytes(down)}/s   ↑ {human_bytes(up)}/s")
+            self.last_net, self.last_net_time = net, now
+        except (OSError, AttributeError):
+            self.details["disk_detail"].configure(text="I/O counters unavailable")
+            self.details["network_detail"].configure(text="Network counters unavailable")
+
+        self.info["uptime"].configure(text=uptime_text(psutil.boot_time()))
+        self.info["disk_space"].configure(
+            text=f"{human_bytes(disk.used)} used / {human_bytes(disk.total)}")
+        self.maybe_alert("CPU", cpu)
+        self.maybe_alert("Memory", mem.percent)
+        self.maybe_alert("Disk", disk.percent)
+        self.footer_status.configure(text=f"Updated {datetime.now():%H:%M:%S}", fg=GREEN)
+
+    def save_report(self):
+        if not psutil:
+            messagebox.showerror("Missing package", "Install psutil first.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save system health report", defaultextension=".txt",
+            filetypes=[("Text report", "*.txt")],
+            initialfile=f"system_health_{datetime.now():%Y%m%d_%H%M%S}.txt")
+        if not path:
+            return
+        try:
+            mem = psutil.virtual_memory()
+            drive = psutil.disk_usage(os.environ.get("SystemDrive", "C:") + "\\")
+            battery = psutil.sensors_battery()
+            report = [
+                "SYSTEM HEALTH MONITOR REPORT", "=" * 35,
+                f"Generated: {datetime.now():%Y-%m-%d %H:%M:%S}",
+                f"Computer: {socket.gethostname()}",
+                f"Operating system: {platform.platform()}",
+                f"Processor: {platform.processor() or 'Not reported'}",
+                f"CPU cores: {psutil.cpu_count(logical=False)} physical / {psutil.cpu_count()} logical",
+                "", "CURRENT METRICS", "-" * 35,
+                f"CPU usage: {psutil.cpu_percent(interval=0):.1f}%",
+                f"Memory usage: {mem.percent:.1f}%",
+                f"Memory used: {human_bytes(mem.used)}",
+                f"Memory available: {human_bytes(mem.available)}",
+                f"System drive usage: {drive.percent:.1f}%",
+                f"Disk free: {human_bytes(drive.free)}",
+                f"Disk total: {human_bytes(drive.total)}",
+                f"Uptime: {uptime_text(psutil.boot_time())}",
+                f"Battery: {f'{battery.percent:.0f}% (plugged in={battery.power_plugged})' if battery else 'Not detected'}",
+                "", "Snapshot of local system metrics; not a diagnostic guarantee."
+            ]
+            with open(path, "w", encoding="utf-8") as file:
+                file.write("\n".join(report))
+            self.log(f"Report saved: {path}")
+            self.footer_status.configure(text="Report saved successfully", fg=GREEN)
+            messagebox.showinfo("Report saved", f"Saved report:\n{path}")
+        except (OSError, PermissionError, Exception) as exc:
+            messagebox.showerror("Save failed", f"Could not save report:\n{exc}")
+
+    def close(self):
+        self.running = False
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    HealthMonitor(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
