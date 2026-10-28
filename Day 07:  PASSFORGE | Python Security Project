@@ -1,0 +1,761 @@
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import sqlite3
+import secrets
+import string
+import hashlib
+import base64
+import os
+import re
+from datetime import datetime
+
+try:
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    from zxcvbn import zxcvbn
+except ImportError:
+    raise SystemExit(
+        "Install dependencies first:\n"
+        "py -m pip install cryptography zxcvbn"
+    )
+
+APP_DIR = os.path.join(
+    os.environ.get("APPDATA", os.path.expanduser("~")),
+    "PASSFORGE"
+)
+os.makedirs(APP_DIR, exist_ok=True)
+DB_PATH = os.path.join(APP_DIR, "passforge.db")
+
+BG = "#0b1220"
+PANEL = "#111c2e"
+PANEL2 = "#17253b"
+ACCENT = "#36d399"
+TEXT = "#eef4ff"
+MUTED = "#9aaac2"
+RED = "#ff6b6b"
+YELLOW = "#ffd166"
+
+
+def derive_key(password, salt):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=600000
+    )
+    return base64.urlsafe_b64encode(
+        kdf.derive(password.encode("utf-8"))
+    )
+
+
+def format_crack_time(seconds):
+    """Format zxcvbn crack-time estimates safely, including Decimal values."""
+    from decimal import Decimal, InvalidOperation
+
+    if seconds is None:
+        return "Unknown"
+
+    try:
+        seconds = Decimal(str(seconds))
+    except (InvalidOperation, ValueError, TypeError):
+        return "Unknown"
+
+    if not seconds.is_finite() or seconds < 0:
+        return "Unknown"
+
+    if seconds < Decimal("1"):
+        return "Less than 1 second"
+    if seconds < Decimal("60"):
+        return f"{float(seconds):.1f} seconds"
+
+    minutes = seconds / Decimal("60")
+    if minutes < Decimal("60"):
+        return f"{float(minutes):.1f} minutes"
+
+    hours = minutes / Decimal("60")
+    if hours < Decimal("24"):
+        return f"{float(hours):.1f} hours"
+
+    days = hours / Decimal("24")
+    if days < Decimal("365"):
+        return f"{float(days):.1f} days"
+
+    years = days / Decimal("365.25")
+    if years < Decimal("1000000"):
+        return f"{float(years):,.1f} years"
+
+    return "Millions of years or longer"
+
+
+def analyze_password(password):
+    if not password:
+        return None
+
+    result = zxcvbn(password)
+    score = result["score"]
+    labels = ["Very weak", "Weak", "Fair", "Strong", "Very strong"]
+
+    # zxcvbn's estimate is model-based, not a guarantee.
+    crack_seconds = result["crack_times_seconds"][
+        "offline_slow_hashing_1e4_per_second"
+    ]
+
+    return {
+        "score": score,
+        "label": labels[score],
+        "time": format_crack_time(crack_seconds),
+        "feedback": result.get("feedback", {}).get("warning", "")
+    }
+
+
+class PassForge:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("PASSFORGE | Password Security")
+        self.root.geometry("1100x740")
+        self.root.minsize(900, 620)
+        self.root.configure(bg=BG)
+
+        self.conn = sqlite3.connect(DB_PATH)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                salt BLOB NOT NULL,
+                verifier BLOB NOT NULL
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site BLOB NOT NULL,
+                username BLOB NOT NULL,
+                password BLOB NOT NULL,
+                notes BLOB,
+                created_at TEXT NOT NULL
+            )
+        """)
+        self.conn.commit()
+
+        self.fernet = None
+        self.setup_style()
+        self.show_unlock()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+    def setup_style(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure(
+            "Treeview",
+            background=PANEL,
+            foreground=TEXT,
+            fieldbackground=PANEL,
+            rowheight=30
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=PANEL2,
+            foreground=TEXT,
+            font=("Segoe UI", 10, "bold")
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", "#245a54")]
+        )
+
+    def clear(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+    def label(self, parent, text, size=10, color=TEXT, bold=False):
+        return tk.Label(
+            parent,
+            text=text,
+            bg=parent.cget("bg"),
+            fg=color,
+            font=("Segoe UI", size, "bold" if bold else "normal")
+        )
+
+    def button(self, parent, text, command, primary=False, danger=False):
+        color = RED if danger else (ACCENT if primary else PANEL2)
+        foreground = "#07131c" if primary else TEXT
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=color,
+            fg=foreground,
+            activebackground=color,
+            activeforeground=foreground,
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=9,
+            cursor="hand2",
+            font=("Segoe UI", 10, "bold")
+        )
+
+    def entry(self, parent, show=None):
+        return tk.Entry(
+            parent,
+            bg="#0d1727",
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 11),
+            show=show
+        )
+
+    # ---------- Master password and vault ----------
+
+    def show_unlock(self):
+        self.clear()
+        card = tk.Frame(self.root, bg=PANEL, padx=38, pady=32)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+
+        self.label(card, "PASSFORGE", 28, ACCENT, True).pack(anchor="w")
+        self.label(
+            card, "YOUR PASSWORDS. YOUR CONTROL.",
+            10, MUTED, True
+        ).pack(anchor="w", pady=(3, 24))
+
+        self.label(card, "Master password", 10, TEXT, True).pack(anchor="w")
+        self.master_entry = self.entry(card, show="*")
+        self.master_entry.pack(fill="x", ipady=10, pady=(7, 14))
+        self.master_entry.bind("<Return>", lambda event: self.unlock())
+
+        exists = self.conn.execute(
+            "SELECT id FROM settings WHERE id=1"
+        ).fetchone()
+
+        if exists:
+            self.button(
+                card, "UNLOCK VAULT", self.unlock, True
+            ).pack(fill="x")
+        else:
+            self.button(
+                card, "CREATE SECURE VAULT", self.create_vault, True
+            ).pack(fill="x")
+
+        self.label(
+            card,
+            "Your master password cannot be recovered if lost.",
+            9, MUTED
+        ).pack(anchor="w", pady=(16, 0))
+
+    def create_vault(self):
+        password = self.master_entry.get()
+
+        if len(password) < 10:
+            messagebox.showwarning(
+                "Master password",
+                "Use at least 10 characters."
+            )
+            return
+
+        salt = os.urandom(16)
+        key = derive_key(password, salt)
+        verifier = hashlib.sha256(
+            key + b"PASSFORGE_VERIFIER"
+        ).digest()
+
+        self.conn.execute(
+            "INSERT INTO settings(id, salt, verifier) VALUES(1, ?, ?)",
+            (salt, verifier)
+        )
+        self.conn.commit()
+        self.fernet = Fernet(key)
+        self.show_dashboard()
+
+    def unlock(self):
+        password = self.master_entry.get()
+        row = self.conn.execute(
+            "SELECT salt, verifier FROM settings WHERE id=1"
+        ).fetchone()
+
+        if not row:
+            self.create_vault()
+            return
+
+        salt, verifier = row
+        key = derive_key(password, salt)
+        test = hashlib.sha256(
+            key + b"PASSFORGE_VERIFIER"
+        ).digest()
+
+        if not secrets.compare_digest(test, verifier):
+            messagebox.showerror(
+                "Unlock failed", "Incorrect master password."
+            )
+            self.master_entry.delete(0, "end")
+            return
+
+        self.fernet = Fernet(key)
+        self.show_dashboard()
+
+    def encrypt(self, value):
+        return self.fernet.encrypt((value or "").encode("utf-8"))
+
+    def decrypt(self, value):
+        return self.fernet.decrypt(value).decode("utf-8")
+
+    def get_entries(self):
+        rows = self.conn.execute("""
+            SELECT id, site, username, password, notes, created_at
+            FROM entries ORDER BY id DESC
+        """).fetchall()
+
+        output = []
+        for row in rows:
+            output.append((
+                row[0],
+                self.decrypt(row[1]),
+                self.decrypt(row[2]),
+                self.decrypt(row[3]),
+                self.decrypt(row[4]),
+                row[5]
+            ))
+        return output
+
+    # ---------- Dashboard ----------
+
+    def show_dashboard(self):
+        self.clear()
+
+        header = tk.Frame(self.root, bg=PANEL, padx=22, pady=16)
+        header.pack(fill="x")
+        self.label(header, "PASSFORGE", 22, ACCENT, True).pack(side="left")
+        self.label(
+            header, "PASSWORD SECURITY CENTER", 9, MUTED, True
+        ).pack(side="left", padx=15, pady=(7, 0))
+        self.button(header, "LOCK VAULT", self.show_unlock).pack(side="right")
+
+        body = tk.Frame(self.root, bg=BG, padx=22, pady=20)
+        body.pack(fill="both", expand=True)
+
+        top = tk.Frame(body, bg=BG)
+        top.pack(fill="x", pady=(0, 15))
+        self.label(top, "Password Manager", 19, TEXT, True).pack(side="left")
+        self.button(
+            top, "TEST MY PASSWORD", self.show_analyzer, True
+        ).pack(side="right")
+        self.button(
+            top, "PASSWORD GENERATOR", self.show_generator
+        ).pack(side="right", padx=8)
+        self.button(
+            top, "+ ADD PASSWORD", self.add_entry
+        ).pack(side="right", padx=8)
+
+        self.label(body, "Search website or username", 9, MUTED).pack(anchor="w")
+        searchrow = tk.Frame(body, bg=BG)
+        searchrow.pack(fill="x", pady=(5, 12))
+        self.search_var = tk.StringVar()
+        search = self.entry(searchrow)
+        search.configure(textvariable=self.search_var)
+        search.pack(side="left", fill="x", expand=True, ipady=9)
+        self.search_var.trace_add(
+            "write", lambda *_: self.refresh_entries()
+        )
+
+        frame = tk.Frame(body, bg=PANEL)
+        frame.pack(fill="both", expand=True)
+
+        self.tree = ttk.Treeview(
+            frame,
+            columns=("site", "username", "created"),
+            show="headings",
+            selectmode="browse"
+        )
+        for col, title in [
+            ("site", "WEBSITE / APP"),
+            ("username", "USERNAME / EMAIL"),
+            ("created", "SAVED ON")
+        ]:
+            self.tree.heading(col, text=title)
+
+        self.tree.column("site", width=300)
+        self.tree.column("username", width=350)
+        self.tree.column("created", width=170)
+        self.tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+        actions = tk.Frame(body, bg=BG)
+        actions.pack(fill="x", pady=(12, 0))
+        self.button(actions, "VIEW / COPY", self.view_entry).pack(side="left")
+        self.button(actions, "EDIT", self.edit_entry).pack(side="left", padx=8)
+        self.button(
+            actions, "DELETE", self.delete_entry, danger=True
+        ).pack(side="left")
+
+        self.label(
+            actions, "Local encrypted vault", 9, MUTED
+        ).pack(side="right")
+
+        self.refresh_entries()
+
+    def refresh_entries(self):
+        if not hasattr(self, "tree") or not self.tree.winfo_exists():
+            return
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        query = self.search_var.get().lower().strip()
+        for row in self.get_entries():
+            if query in row[1].lower() or query in row[2].lower():
+                self.tree.insert(
+                    "", "end", iid=str(row[0]),
+                    values=(row[1], row[2], row[5])
+                )
+
+    def selected_entry(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Select entry", "Select an entry first.")
+            return None
+
+        entry_id = int(selected[0])
+        for row in self.get_entries():
+            if row[0] == entry_id:
+                return row
+        return None
+
+    # ---------- Password vault CRUD ----------
+
+    def add_entry(self):
+        self.entry_form()
+
+    def edit_entry(self):
+        row = self.selected_entry()
+        if row:
+            self.entry_form(row)
+
+    def entry_form(self, existing=None):
+        win = tk.Toplevel(self.root)
+        win.title("Password Entry")
+        win.geometry("480x510")
+        win.configure(bg=BG)
+        win.transient(self.root)
+        win.grab_set()
+
+        panel = tk.Frame(win, bg=PANEL, padx=24, pady=22)
+        panel.pack(fill="both", expand=True, padx=14, pady=14)
+
+        self.label(
+            panel, "EDIT ENTRY" if existing else "NEW ENTRY",
+            17, ACCENT, True
+        ).pack(anchor="w", pady=(0, 12))
+
+        fields = {}
+        definitions = [
+            ("site", "Website / App", False),
+            ("username", "Username / Email", False),
+            ("password", "Password", True),
+            ("notes", "Notes (optional)", False)
+        ]
+
+        for key, title, secret in definitions:
+            self.label(panel, title, 9, MUTED, True).pack(anchor="w", pady=(8, 4))
+            field = self.entry(panel, show="*" if secret else None)
+            field.pack(fill="x", ipady=8)
+            fields[key] = field
+
+            if existing:
+                value = {
+                    "site": existing[1],
+                    "username": existing[2],
+                    "password": existing[3],
+                    "notes": existing[4]
+                }[key]
+                field.insert(0, value)
+
+        def save():
+            site = fields["site"].get().strip()
+            username = fields["username"].get().strip()
+            password = fields["password"].get()
+            notes = fields["notes"].get()
+
+            if not site or not username or not password:
+                messagebox.showwarning(
+                    "Missing details",
+                    "Website, username and password are required.",
+                    parent=win
+                )
+                return
+
+            if existing:
+                self.conn.execute("""
+                    UPDATE entries SET site=?, username=?, password=?, notes=?
+                    WHERE id=?
+                """, (
+                    self.encrypt(site), self.encrypt(username),
+                    self.encrypt(password), self.encrypt(notes), existing[0]
+                ))
+            else:
+                self.conn.execute("""
+                    INSERT INTO entries(site, username, password, notes, created_at)
+                    VALUES(?, ?, ?, ?, ?)
+                """, (
+                    self.encrypt(site), self.encrypt(username),
+                    self.encrypt(password), self.encrypt(notes),
+                    datetime.now().strftime("%Y-%m-%d %H:%M")
+                ))
+
+            self.conn.commit()
+            win.destroy()
+            self.refresh_entries()
+
+        self.button(panel, "SAVE ENCRYPTED ENTRY", save, True).pack(
+            fill="x", pady=(20, 0)
+        )
+
+    def view_entry(self):
+        row = self.selected_entry()
+        if not row:
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Password Details")
+        win.geometry("500x360")
+        win.configure(bg=BG)
+        win.transient(self.root)
+        win.grab_set()
+
+        panel = tk.Frame(win, bg=PANEL, padx=22, pady=22)
+        panel.pack(fill="both", expand=True, padx=14, pady=14)
+        self.label(panel, row[1], 17, ACCENT, True).pack(anchor="w")
+
+        self.label(panel, "Username", 9, MUTED).pack(anchor="w", pady=(12, 4))
+        username = self.entry(panel)
+        username.pack(fill="x", ipady=8)
+        username.insert(0, row[2])
+        username.configure(state="readonly")
+
+        self.label(panel, "Password", 9, MUTED).pack(anchor="w", pady=(12, 4))
+        password = self.entry(panel, show="*")
+        password.pack(fill="x", ipady=8)
+        password.insert(0, row[3])
+
+        def toggle():
+            password.configure(show="" if password.cget("show") else "*")
+
+        rowbtn = tk.Frame(panel, bg=PANEL)
+        rowbtn.pack(fill="x", pady=12)
+        self.button(rowbtn, "SHOW / HIDE", toggle).pack(side="left")
+        self.button(
+            rowbtn, "COPY PASSWORD",
+            lambda: self.copy_text(row[3]), True
+        ).pack(side="left", padx=8)
+        self.button(
+            rowbtn, "COPY USERNAME",
+            lambda: self.copy_text(row[2])
+        ).pack(side="left")
+
+    def copy_text(self, value):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(value)
+        self.root.update()
+        messagebox.showinfo(
+            "Copied",
+            "Copied to clipboard. Clear the clipboard when finished."
+        )
+
+    def delete_entry(self):
+        row = self.selected_entry()
+        if not row:
+            return
+
+        if messagebox.askyesno(
+            "Delete entry", "Permanently delete this saved password?"
+        ):
+            self.conn.execute("DELETE FROM entries WHERE id=?", (row[0],))
+            self.conn.commit()
+            self.refresh_entries()
+
+    # ---------- Password Analyzer ----------
+
+    def show_analyzer(self):
+        win = tk.Toplevel(self.root)
+        win.title("PASSFORGE | Test My Password")
+        win.geometry("600x540")
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+
+        panel = tk.Frame(win, bg=PANEL, padx=26, pady=24)
+        panel.pack(fill="both", expand=True, padx=15, pady=15)
+
+        self.label(panel, "TEST MY PASSWORD", 21, ACCENT, True).pack(anchor="w")
+        self.label(
+            panel,
+            "Check strength and estimated automated guessing time.",
+            9, MUTED
+        ).pack(anchor="w", pady=(5, 18))
+
+        self.label(panel, "Enter a password to analyze", 10, TEXT, True).pack(anchor="w")
+        pw_entry = self.entry(panel, show="*")
+        pw_entry.pack(fill="x", ipady=10, pady=(7, 8))
+
+        show_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            panel, text="Show password", variable=show_var,
+            command=lambda: pw_entry.configure(
+                show="" if show_var.get() else "*"
+            ),
+            bg=PANEL, fg=TEXT, selectcolor=PANEL2,
+            activebackground=PANEL, activeforeground=TEXT
+        ).pack(anchor="w")
+
+        strength = self.label(panel, "Strength: —", 14, MUTED, True)
+        strength.pack(anchor="w", pady=(18, 6))
+
+        crack = self.label(panel, "Estimated crack time: —", 12, TEXT, True)
+        crack.pack(anchor="w", pady=6)
+
+        explanation = self.label(
+            panel,
+            "Uses zxcvbn's offline slow-hash scenario. This is an estimate, not a guarantee.",
+            9, MUTED
+        )
+        explanation.pack(anchor="w", pady=(4, 10))
+
+        feedback = self.label(panel, "", 10, YELLOW)
+        feedback.pack(anchor="w", pady=4)
+
+        def test_password():
+            password = pw_entry.get()
+            if not password:
+                messagebox.showwarning(
+                    "Enter password", "Type a password to analyze.", parent=win
+                )
+                return
+
+            result = analyze_password(password)
+            score = result["score"]
+            colors = [RED, RED, YELLOW, ACCENT, ACCENT]
+            strength.configure(
+                text=f"Strength: {result['label']} ({score}/4)",
+                fg=colors[score]
+            )
+            crack.configure(text="Estimated crack time: " + result["time"])
+            feedback.configure(
+                text=result["feedback"] or
+                "Tip: use a unique password or passphrase for every account."
+            )
+
+        self.button(panel, "ANALYZE PASSWORD", test_password, True).pack(
+            fill="x", pady=(15, 0)
+        )
+        self.label(
+            panel,
+            "Privacy: analysis happens locally in this app.",
+            9, MUTED
+        ).pack(anchor="w", pady=(13, 0))
+
+    # ---------- Password Generator ----------
+
+    def show_generator(self):
+        win = tk.Toplevel(self.root)
+        win.title("PASSFORGE | Password Generator")
+        win.geometry("540x520")
+        win.configure(bg=BG)
+        win.transient(self.root)
+        win.grab_set()
+
+        panel = tk.Frame(win, bg=PANEL, padx=24, pady=22)
+        panel.pack(fill="both", expand=True, padx=14, pady=14)
+
+        self.label(panel, "PASSWORD GENERATOR", 18, ACCENT, True).pack(anchor="w")
+        self.label(panel, "Generate a unique password using a secure random generator.",
+                   9, MUTED).pack(anchor="w", pady=(5, 15))
+
+        length = tk.IntVar(value=20)
+        self.label(panel, "Password length", 10, TEXT, True).pack(anchor="w")
+        tk.Scale(
+            panel, from_=8, to=64, orient="horizontal", variable=length,
+            bg=PANEL, fg=TEXT, highlightthickness=0,
+            troughcolor=PANEL2, activebackground=ACCENT
+        ).pack(fill="x")
+
+        options = {}
+        for key, title in [
+            ("lower", "Lowercase letters"),
+            ("upper", "Uppercase letters"),
+            ("digits", "Numbers"),
+            ("symbols", "Symbols")
+        ]:
+            var = tk.BooleanVar(value=True)
+            options[key] = var
+            tk.Checkbutton(
+                panel, text=title, variable=var,
+                bg=PANEL, fg=TEXT, selectcolor=PANEL2,
+                activebackground=PANEL, activeforeground=TEXT
+            ).pack(anchor="w")
+
+        result = self.entry(panel)
+        result.pack(fill="x", ipady=10, pady=(12, 8))
+        strength = self.label(panel, "Strength: —", 10, MUTED, True)
+        strength.pack(anchor="w", pady=(0, 8))
+
+        def generate():
+            pools = []
+            if options["lower"].get():
+                pools.append(string.ascii_lowercase)
+            if options["upper"].get():
+                pools.append(string.ascii_uppercase)
+            if options["digits"].get():
+                pools.append(string.digits)
+            if options["symbols"].get():
+                pools.append("!@#$%^&*()-_=+[]{};:,.?")
+
+            if not pools:
+                messagebox.showwarning(
+                    "Choose options",
+                    "Select at least one character type.",
+                    parent=win
+                )
+                return
+
+            n = length.get()
+            chars = [secrets.choice(pool) for pool in pools]
+            alphabet = "".join(pools)
+            chars.extend(
+                secrets.choice(alphabet)
+                for _ in range(max(0, n - len(chars)))
+            )
+            secrets.SystemRandom().shuffle(chars)
+            password = "".join(chars[:n])
+
+            result.delete(0, "end")
+            result.insert(0, password)
+            analysis = analyze_password(password)
+            strength.configure(
+                text="Strength: " + analysis["label"],
+                fg=ACCENT if analysis["score"] >= 3 else YELLOW
+            )
+
+        row = tk.Frame(panel, bg=PANEL)
+        row.pack(fill="x")
+        self.button(row, "GENERATE", generate, True).pack(side="left")
+        self.button(
+            row, "COPY",
+            lambda: self.copy_text(result.get())
+        ).pack(side="left", padx=8)
+        self.button(
+            row, "TEST CRACK TIME",
+            lambda: self.show_analyzer()
+        ).pack(side="left")
+
+        generate()
+
+    def close(self):
+        self.conn.close()
+        self.root.destroy()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PassForge(root)
+    root.mainloop()
