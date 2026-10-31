@@ -1,0 +1,759 @@
+
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import psutil
+import time
+import socket
+import sqlite3
+import threading
+import subprocess
+import platform
+import ipaddress
+from datetime import datetime
+
+try:
+    import matplotlib
+    matplotlib.use("TkAgg")
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+except ImportError:
+    Figure = None
+
+DB = "netshield_history.db"
+
+
+class NetShield:
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("NETSHIELD PRO - Network Monitor")
+        self.root.geometry("1250x820")
+        self.root.configure(bg="#0b1220")
+
+        self.previous = psutil.net_io_counters()
+        self.previous_time = time.time()
+
+        self.download_data = []
+        self.upload_data = []
+        self.seen_connections = set()
+        self.scanning = False
+        self.alert_total = 0
+
+        self.create_database()
+        self.create_interface()
+
+        self.refresh_data()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+    # DATABASE
+    def create_database(self):
+        with sqlite3.connect(DB) as con:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS events(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    time TEXT,
+                    event TEXT,
+                    details TEXT
+                )
+            """)
+
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS alerts(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    time TEXT,
+                    severity TEXT,
+                    message TEXT
+                )
+            """)
+
+    def log_event(self, event, details):
+        with sqlite3.connect(DB) as con:
+            con.execute(
+                "INSERT INTO events(time,event,details) VALUES(?,?,?)",
+                (
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    event,
+                    str(details)
+                )
+            )
+
+    # INTERFACE
+    def create_interface(self):
+
+        header = tk.Frame(self.root, bg="#0b1220")
+        header.pack(fill="x", padx=20, pady=15)
+
+        tk.Label(
+            header,
+            text="NETSHIELD PRO",
+            font=("Segoe UI", 25, "bold"),
+            bg="#0b1220",
+            fg="#57d6c7"
+        ).pack(side="left")
+
+        self.status = tk.Label(
+            header,
+            text="● MONITORING",
+            font=("Segoe UI", 11, "bold"),
+            bg="#0b1220",
+            fg="#6ee7a8"
+        )
+        self.status.pack(side="right")
+
+        # TOP CARDS
+        cards = tk.Frame(self.root, bg="#0b1220")
+        cards.pack(fill="x", padx=15)
+
+        self.download_label = self.create_card(cards, "DOWNLOAD")
+        self.upload_label = self.create_card(cards, "UPLOAD")
+        self.connection_label = self.create_card(cards, "CONNECTIONS")
+        self.alert_label = self.create_card(cards, "SECURITY ALERTS")
+
+        # MAIN AREA
+        main = tk.Frame(self.root, bg="#0b1220")
+        main.pack(fill="both", expand=True, padx=15, pady=15)
+
+        left = tk.Frame(main, bg="#111c2e")
+        left.pack(side="left", fill="both", expand=True, padx=5)
+
+        right = tk.Frame(main, bg="#111c2e", width=400)
+        right.pack(side="right", fill="both", padx=5)
+        right.pack_propagate(False)
+
+        # GRAPH
+        tk.Label(
+            left,
+            text="LIVE BANDWIDTH GRAPH",
+            bg="#111c2e",
+            fg="white",
+            font=("Segoe UI", 12, "bold")
+        ).pack(anchor="w", padx=12, pady=10)
+
+        self.graph_frame = tk.Frame(left, bg="#111c2e")
+        self.graph_frame.pack(fill="both", expand=True)
+
+        if Figure:
+            self.fig = Figure(figsize=(7, 3), dpi=100, facecolor="#111c2e")
+            self.ax = self.fig.add_subplot(111)
+            self.ax.set_facecolor("#111c2e")
+            self.ax.tick_params(colors="white")
+
+            self.line_down, = self.ax.plot(
+                [], [], label="Download", color="#57d6c7"
+            )
+
+            self.line_up, = self.ax.plot(
+                [], [], label="Upload", color="#79a9ff"
+            )
+
+            self.ax.legend(
+                facecolor="#111c2e",
+                labelcolor="white"
+            )
+
+            self.canvas = FigureCanvasTkAgg(
+                self.fig,
+                master=self.graph_frame
+            )
+
+            self.canvas.get_tk_widget().pack(
+                fill="both",
+                expand=True
+            )
+        else:
+            tk.Label(
+                self.graph_frame,
+                text="Install matplotlib to enable graph",
+                bg="#111c2e",
+                fg="#ffc46b"
+            ).pack(pady=30)
+
+        # CONNECTION TABLE
+        tk.Label(
+            left,
+            text="ACTIVE CONNECTIONS",
+            bg="#111c2e",
+            fg="white",
+            font=("Segoe UI", 12, "bold")
+        ).pack(anchor="w", padx=12, pady=8)
+
+        self.connection_table = ttk.Treeview(
+            left,
+            columns=("protocol", "local", "remote", "status", "process"),
+            show="headings",
+            height=10
+        )
+
+        columns = {
+            "protocol": 65,
+            "local": 140,
+            "remote": 140,
+            "status": 100,
+            "process": 130
+        }
+
+        for col, width in columns.items():
+            self.connection_table.heading(col, text=col.upper())
+            self.connection_table.column(col, width=width)
+
+        self.connection_table.pack(
+            fill="both",
+            expand=True,
+            padx=10,
+            pady=10
+        )
+
+        # ALERT TABLE
+        tk.Label(
+            right,
+            text="SECURITY ALERTS",
+            bg="#111c2e",
+            fg="white",
+            font=("Segoe UI", 12, "bold")
+        ).pack(anchor="w", padx=10, pady=10)
+
+        self.alert_table = ttk.Treeview(
+            right,
+            columns=("time", "severity", "message"),
+            show="headings",
+            height=10
+        )
+
+        for col, width in [
+            ("time", 65),
+            ("severity", 75),
+            ("message", 230)
+        ]:
+            self.alert_table.heading(col, text=col.upper())
+            self.alert_table.column(col, width=width)
+
+        self.alert_table.pack(fill="both", expand=True, padx=8)
+
+        # DEVICE TABLE
+        tk.Label(
+            right,
+            text="LOCAL NETWORK DEVICES",
+            bg="#111c2e",
+            fg="white",
+            font=("Segoe UI", 12, "bold")
+        ).pack(anchor="w", padx=10, pady=10)
+
+        self.device_table = ttk.Treeview(
+            right,
+            columns=("ip", "mac"),
+            show="headings",
+            height=6
+        )
+
+        self.device_table.heading("ip", text="IP ADDRESS")
+        self.device_table.heading("mac", text="MAC ADDRESS")
+
+        self.device_table.column("ip", width=140)
+        self.device_table.column("mac", width=190)
+
+        self.device_table.pack(fill="both", expand=True, padx=8)
+
+        # BUTTONS
+        buttons = tk.Frame(right, bg="#111c2e")
+        buttons.pack(fill="x", pady=12)
+
+        tk.Button(
+            buttons,
+            text="SCAN NETWORK",
+            command=self.scan_network,
+            bg="#245477",
+            fg="white",
+            relief="flat",
+            padx=10,
+            pady=8
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            buttons,
+            text="EXPORT PDF",
+            command=self.export_pdf,
+            bg="#245477",
+            fg="white",
+            relief="flat",
+            padx=10,
+            pady=8
+        ).pack(side="left", padx=5)
+
+    def create_card(self, parent, title):
+        frame = tk.Frame(
+            parent,
+            bg="#111c2e",
+            highlightbackground="#263852",
+            highlightthickness=1
+        )
+
+        frame.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=5
+        )
+
+        tk.Label(
+            frame,
+            text=title,
+            bg="#111c2e",
+            fg="#9eb5d3",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor="w", padx=12, pady=5)
+
+        value = tk.Label(
+            frame,
+            text="0",
+            bg="#111c2e",
+            fg="#57d6c7",
+            font=("Segoe UI", 18, "bold")
+        )
+
+        value.pack(anchor="w", padx=12, pady=5)
+
+        return value
+
+    # SPEED FORMAT
+    def format_speed(self, speed):
+        units = ["B/s", "KB/s", "MB/s", "GB/s"]
+
+        for unit in units:
+            if speed < 1024:
+                return f"{speed:.1f} {unit}"
+            speed /= 1024
+
+        return f"{speed:.1f} GB/s"
+
+    # CONNECTION ADDRESS
+    def address(self, addr):
+        if not addr:
+            return "-"
+
+        try:
+            return f"{addr.ip}:{addr.port}"
+        except AttributeError:
+            return str(addr)
+
+    # SECURITY ALERT
+    def add_alert(self, severity, message):
+
+        self.alert_total += 1
+
+        self.alert_label.config(
+            text=str(self.alert_total)
+        )
+
+        self.alert_table.insert(
+            "",
+            0,
+            values=(
+                datetime.now().strftime("%H:%M:%S"),
+                severity,
+                message
+            )
+        )
+
+        with sqlite3.connect(DB) as con:
+            con.execute(
+                "INSERT INTO alerts(time,severity,message) VALUES(?,?,?)",
+                (
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    severity,
+                    message
+                )
+            )
+
+    # CONNECTION MONITOR
+    def monitor_connections(self):
+
+        for item in self.connection_table.get_children():
+            self.connection_table.delete(item)
+
+        try:
+            connections = psutil.net_connections(kind="inet")
+        except (psutil.AccessDenied, PermissionError):
+            connections = []
+
+        self.connection_label.config(
+            text=str(len(connections))
+        )
+
+        notable_ports = {
+            21, 23, 2323, 4444,
+            5555, 6667, 31337
+        }
+
+        for c in connections[:200]:
+
+            protocol = (
+                "TCP" if c.type == socket.SOCK_STREAM else "UDP"
+            )
+
+            local = self.address(c.laddr)
+            remote = self.address(c.raddr) if c.raddr else "-"
+            status = c.status or "BOUND"
+
+            try:
+                process = (
+                    psutil.Process(c.pid).name()
+                    if c.pid else "System"
+                )
+            except (psutil.Error, PermissionError):
+                process = "Unknown"
+
+            self.connection_table.insert(
+                "",
+                "end",
+                values=(
+                    protocol,
+                    local,
+                    remote,
+                    status,
+                    process
+                )
+            )
+
+            key = (protocol, local, remote, process)
+
+            if remote != "-" and key not in self.seen_connections:
+
+                self.seen_connections.add(key)
+
+                try:
+                    port = int(remote.rsplit(":", 1)[1])
+                except (ValueError, IndexError):
+                    port = 0
+
+                if port in notable_ports:
+                    self.add_alert(
+                        "MEDIUM",
+                        f"{process}: connection to port {port}. Verify it."
+                    )
+
+                else:
+                    self.log_event(
+                        "NEW_CONNECTION",
+                        f"{process} -> {remote}"
+                    )
+
+            # Selected listening services
+            if status == "LISTEN":
+                try:
+                    port = int(local.rsplit(":", 1)[1])
+                except (ValueError, IndexError):
+                    port = 0
+
+                listen_key = ("LISTEN", local, process)
+
+                if port in (22, 3389, 445, 5900) and listen_key not in self.seen_connections:
+                    self.seen_connections.add(listen_key)
+                    self.add_alert(
+                        "MEDIUM",
+                        f"Service listening on port {port}: {process}"
+                    )
+
+        if len(connections) > 150:
+            key = ("HIGH_CONNECTION_COUNT",)
+
+            if key not in self.seen_connections:
+                self.seen_connections.add(key)
+                self.add_alert(
+                    "MEDIUM",
+                    f"High connection count: {len(connections)}"
+                )
+
+    # LIVE BANDWIDTH
+    def refresh_data(self):
+
+        now = time.time()
+        current = psutil.net_io_counters()
+
+        elapsed = max(now - self.previous_time, 0.001)
+
+        download = max(
+            0,
+            current.bytes_recv - self.previous.bytes_recv
+        ) / elapsed
+
+        upload = max(
+            0,
+            current.bytes_sent - self.previous.bytes_sent
+        ) / elapsed
+
+        self.previous = current
+        self.previous_time = now
+
+        self.download_label.config(
+            text=self.format_speed(download)
+        )
+
+        self.upload_label.config(
+            text=self.format_speed(upload)
+        )
+
+        self.download_data.append(download / 1024)
+        self.upload_data.append(upload / 1024)
+
+        self.download_data = self.download_data[-30:]
+        self.upload_data = self.upload_data[-30:]
+
+        if Figure:
+            x = list(range(len(self.download_data)))
+
+            self.line_down.set_data(x, self.download_data)
+            self.line_up.set_data(x, self.upload_data)
+
+            self.ax.set_xlim(0, 29)
+
+            maximum = max(
+                self.download_data + self.upload_data + [10]
+            )
+
+            self.ax.set_ylim(0, maximum * 1.2)
+
+            self.canvas.draw_idle()
+
+        self.monitor_connections()
+
+        self.status.config(
+            text="● MONITORING | Last update: "
+            + datetime.now().strftime("%H:%M:%S")
+        )
+
+        self.log_event(
+            "BANDWIDTH",
+            f"Download={download:.0f} B/s, Upload={upload:.0f} B/s"
+        )
+
+        self.root.after(2000, self.refresh_data)
+
+    # LAN DEVICE DISCOVERY
+    def scan_network(self):
+
+        if self.scanning:
+            return
+
+        self.scanning = True
+
+        self.status.config(
+            text="● SCANNING LOCAL NETWORK..."
+        )
+
+        threading.Thread(
+            target=self.scan_worker,
+            daemon=True
+        ).start()
+
+    def scan_worker(self):
+
+        found = {}
+
+        try:
+            sock = socket.socket(
+                socket.AF_INET,
+                socket.SOCK_DGRAM
+            )
+
+            try:
+                sock.connect(("8.8.8.8", 80))
+                local_ip = sock.getsockname()[0]
+            finally:
+                sock.close()
+
+            network = ipaddress.ip_network(
+                local_ip + "/24",
+                strict=False
+            )
+
+            if platform.system() == "Windows":
+
+                for ip in network.hosts():
+
+                    if str(ip) == local_ip:
+                        continue
+
+                    subprocess.run(
+                        ["ping", "-n", "1", "-w", "100", str(ip)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=getattr(
+                            subprocess,
+                            "CREATE_NO_WINDOW",
+                            0
+                        )
+                    )
+
+                result = subprocess.run(
+                    ["arp", "-a"],
+                    capture_output=True,
+                    text=True,
+                    errors="ignore",
+                    creationflags=getattr(
+                        subprocess,
+                        "CREATE_NO_WINDOW",
+                        0
+                    )
+                )
+
+                for line in result.stdout.splitlines():
+
+                    parts = line.split()
+
+                    if len(parts) >= 2:
+
+                        try:
+                            ipaddress.ip_address(parts[0])
+
+                            if "-" in parts[1]:
+                                found[parts[0]] = parts[1]
+
+                        except ValueError:
+                            pass
+
+            found[local_ip] = "This PC"
+
+        except Exception as error:
+            self.log_event("SCAN_ERROR", error)
+
+        self.root.after(
+            0,
+            lambda data=found: self.finish_scan(data)
+        )
+
+    def finish_scan(self, found):
+
+        for item in self.device_table.get_children():
+            self.device_table.delete(item)
+
+        for ip, mac in sorted(found.items()):
+            self.device_table.insert(
+                "",
+                "end",
+                values=(ip, mac)
+            )
+
+        self.scanning = False
+
+        self.status.config(
+            text=f"● MONITORING | Found {len(found)} LAN entries"
+        )
+
+        self.log_event(
+            "LAN_SCAN",
+            f"{len(found)} entries"
+        )
+
+    # PDF REPORT
+    def export_pdf(self):
+
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.platypus import (
+                SimpleDocTemplate,
+                Paragraph,
+                Table,
+                TableStyle,
+                Spacer
+            )
+            from reportlab.lib.styles import getSampleStyleSheet
+
+        except ImportError:
+            messagebox.showerror(
+                "Missing Library",
+                "Run: py -m pip install reportlab"
+            )
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF Files", "*.pdf")],
+            initialfile="NetShield_Report.pdf"
+        )
+
+        if not path:
+            return
+
+        try:
+            connections = psutil.net_connections(kind="inet")
+        except psutil.Error:
+            connections = []
+
+        data = [
+            ["Protocol", "Local", "Remote", "Status"]
+        ]
+
+        for c in connections[:40]:
+
+            protocol = (
+                "TCP" if c.type == socket.SOCK_STREAM else "UDP"
+            )
+
+            data.append([
+                protocol,
+                self.address(c.laddr),
+                self.address(c.raddr) if c.raddr else "-",
+                c.status
+            ])
+
+        table = Table(data, repeatRows=1)
+
+        table.setStyle(
+            TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#203a58")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("FONTSIZE", (0, 0), (-1, -1), 8)
+            ])
+        )
+
+        styles = getSampleStyleSheet()
+
+        story = [
+            Paragraph(
+                "NetShield Pro - Network Snapshot",
+                styles["Title"]
+            ),
+            Paragraph(
+                "Generated: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                styles["Normal"]
+            ),
+            Spacer(1, 12),
+            Paragraph(
+                "Educational monitoring report. Alerts are heuristic indicators, not proof of malware.",
+                styles["Normal"]
+            ),
+            Spacer(1, 12),
+            table
+        ]
+
+        from reportlab.platypus import SimpleDocTemplate
+
+        SimpleDocTemplate(
+            path,
+            pagesize=A4
+        ).build(story)
+
+        messagebox.showinfo(
+            "Success",
+            "PDF report saved successfully!"
+        )
+
+    def close(self):
+        self.root.destroy()
+
+
+if __name__ == "__main__":
+
+    root = tk.Tk()
+
+    try:
+        app = NetShield(root)
+        root.mainloop()
+
+    except Exception as error:
+        messagebox.showerror(
+            "NetShield Error",
+            str(error)
+        )
